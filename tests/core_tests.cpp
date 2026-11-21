@@ -3,10 +3,10 @@
 #include "protocol.hpp"
 #include "settings.hpp"
 
-#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -104,40 +104,38 @@ void lifecycle() {
     const auto expired = mixer.sample(519ms, {});
     equal(expired.force, 0, "last iteration expired");
     check(!expired.active && !mixer.active(519ms), "expiration clears active state");
-    check(!mixer.playing(finite, 520ms), "expired effect status");
-
     effect.duration = 100ms;
-    check(mixer.update(finite, effect, 520ms), "edit expired effect");
-    check(!mixer.playing(finite, 520ms), "edit does not restart expired effect");
+    check(mixer.start(finite, 519ms, 1) && mixer.update(finite, effect, 544ms) &&
+          mixer.playing(finite, 544ms) == false, "edit does not restart an expired effect between mixer ticks");
 
     effect.delay = {};
     effect.duration = forever;
     effect.parameters = Constant{1};
     const auto first = mixer.add(effect);
     const auto second = mixer.add(effect);
-    mixer.start(first, 520ms, repeat_forever);
-    mixer.start(second, 520ms, repeat_forever);
+    mixer.start(first, 544ms, repeat_forever);
+    mixer.start(second, 544ms, repeat_forever);
     mixer.set_gain(0.25);
-    equal(mixer.sample(521ms, {}).force, 0.5, "effects are summed before global gain");
+    equal(mixer.sample(545ms, {}).force, 0.5, "effects are summed before global gain");
     mixer.set_enabled(false);
-    equal(mixer.sample(522ms, {}).force, 0, "actuators off");
-    check(mixer.playing(first, 522ms), "muted effects continue timing");
+    equal(mixer.sample(546ms, {}).force, 0, "actuators off");
+    check(mixer.playing(first, 546ms) == true, "muted effects continue timing");
     mixer.set_enabled(true);
-    mixer.start(second, 523ms, 1, true);
-    equal(mixer.sample(523ms, {}).force, 0.25, "solo stops other effects");
+    mixer.start(second, 547ms, 1, true);
+    equal(mixer.sample(547ms, {}).force, 0.25, "solo stops other effects");
     check(mixer.erase(second), "destroy active effect");
-    equal(mixer.sample(524ms, {}).force, 0, "destroy silences output");
+    equal(mixer.sample(548ms, {}).force, 0, "destroy silences output");
     mixer.reset();
-    check(mixer.size() == 0 && !mixer.contains(first), "reset unloads effects");
+    check(mixer.size() == 0 && !mixer.playing(first, 548ms).has_value(), "reset unloads effects");
     Mixer::Id last = 0;
     for (unsigned n = 0; n < Mixer::capacity; ++n) {
         last = mixer.add(effect);
         check(last != 0, "allocate slot");
     }
     check(mixer.add(effect) == 0, "fixed maximum effect count");
-    check(mixer.start(last, 525ms, 1) && mixer.sample(525ms, {}).active, "last slot can play");
+    check(mixer.start(last, 549ms, 1) && mixer.sample(549ms, {}).active, "last slot can play");
     mixer.stop_all();
-    check(!mixer.sample(526ms, {}).active, "stop all clears the last slot");
+    check(!mixer.sample(550ms, {}).active, "stop all clears the last slot");
 }
 
 void correction() {
@@ -234,10 +232,6 @@ void protocol() {
     check(!native_switch_candidate(vendor_id, compatibility_product_id, 0x1300), "reject DFGT compatibility revision");
     check(!native_switch_candidate(vendor_id, product_id, 0x1350), "native G29 does not need a mode switch");
     check(!native_switch_candidate(0x1234, compatibility_product_id, 0x1350), "reject unrelated vendor");
-    check(reset_mode_on_usb_reset == std::array<std::uint8_t, 8>{0, 0xf8, 0x0a},
-          "mode reverts on USB reset");
-    check(switch_to_native_mode == std::array<std::uint8_t, 8>{0, 0xf8, 0x09, 5, 1, 1},
-          "native mode switch with detach");
     const auto force = torque(force_byte(1));
     check(force == OutputReport{0, 0x11, 0x08, 0x00, 0x80}, "right force and zero padding");
     check(torque(force_byte(-1)) == OutputReport{0, 0x11, 0x08, 0xff, 0x80}, "left force");

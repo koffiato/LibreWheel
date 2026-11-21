@@ -58,8 +58,7 @@ public:
     bool erase(Id id) noexcept;
     bool start(Id id, Time now, std::uint32_t iterations, bool solo = false) noexcept;
     bool stop(Id id) noexcept;
-    bool contains(Id id) const noexcept;
-    bool playing(Id id, Time now) const noexcept;
+    std::optional<bool> playing(Id id, Time now) const noexcept;
     bool active(Time now) const noexcept;
     unsigned size() const noexcept;
     void stop_all() noexcept;

@@ -99,7 +99,7 @@ double evaluate(const Effect& effect, Time elapsed, const Motion& motion) noexce
 Mixer::Id Mixer::add(const Effect& effect) noexcept {
     for (auto& slot : slots_) {
         if (slot.id == 0) {
-            while (next_id_ == 0 || contains(next_id_)) {
+            while (next_id_ == 0 || find(next_id_)) {
                 ++next_id_;
             }
             slot = Slot{next_id_++, effect};
@@ -185,8 +185,6 @@ bool Mixer::stop(Id id) noexcept {
     return true;
 }
 
-bool Mixer::contains(Id id) const noexcept { return find(id) != nullptr; }
-
 Time Mixer::clock_at(Time now) const noexcept {
     return paused_at_.value_or(now) - paused_total_;
 }
@@ -200,9 +198,12 @@ bool Mixer::playing_at(const Slot& slot, Time now) noexcept {
            slot.iterations == repeat_forever || elapsed / slot.effect.duration < slot.iterations;
 }
 
-bool Mixer::playing(Id id, Time now) const noexcept {
+std::optional<bool> Mixer::playing(Id id, Time now) const noexcept {
     const auto* slot = find(id);
-    return slot && playing_at(*slot, clock_at(now));
+    if (!slot) {
+        return std::nullopt;
+    }
+    return playing_at(*slot, clock_at(now));
 }
 
 bool Mixer::active(Time now) const noexcept {

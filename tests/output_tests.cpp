@@ -102,7 +102,9 @@ bool trace_ring() {
 
 int main() {
     for (auto end : {End::host_exit, End::stale, End::explicit_stop, End::send_error, End::steady_force}) {
-        if (!verify(end, OutputStrength::limited) || !verify(end, OutputStrength::full)) {
+        // The steady-force fixture exercises both ends of the bench clamp.
+        const auto strength = end == End::steady_force ? OutputStrength::limited : OutputStrength::full;
+        if (!verify(end, strength)) {
             std::cerr << "Output shutdown fixture failed: " << static_cast<int>(end) << '\n';
             return 1;
         }

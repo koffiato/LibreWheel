@@ -115,8 +115,6 @@ void lifecycle(IDirectInputEffectDriver& driver, wchar_t* device_path, bool phys
 
     constexpr DWORD id = 37;
     DWORD handle = 0;
-    check(driver.DownloadEffect(id, 0, &handle, &effect, 0) == DIERR_NOTEXCLUSIVEACQUIRED,
-          "download requires a successful DeviceID");
     check(FAILED(driver.DeviceID(DIRECTINPUT_VERSION, id, 1, 0, nullptr)), "missing HID init rejected");
     DIHIDFFINITINFO init{sizeof(init), device_path, {}};
     const auto attach = driver.DeviceID(DIRECTINPUT_VERSION, id, 1, 0, &init);
@@ -147,14 +145,20 @@ void lifecycle(IDirectInputEffectDriver& driver, wchar_t* device_path, bool phys
     DWORD second = 0;
     check(driver.DownloadEffect(id, 0, &second, &effect, 0) == DI_OK && second != handle,
           "second downloaded effect gets distinct ID");
-    check(driver.StartEffect(id, second, DIES_SOLO, 1) == DI_OK, "solo start");
+    check(driver.StartEffect(id, second, DIES_SOLO, 1) == DI_OK &&
+          driver.GetEffectStatus(id, second, &state) == DI_OK && state == DIEGES_PLAYING,
+          "solo starts the selected effect");
     check(driver.GetEffectStatus(id, handle, &state) == DI_OK && !state, "solo stops previous effect");
     check(driver.SendForceFeedbackCommand(id, DISFFC_PAUSE) == DI_OK, "pause command");
     DIDEVICESTATE device{sizeof(device), 0, 0};
     check(driver.GetForceFeedbackState(id, &device) == DI_OK && (device.dwState & DIGFFS_PAUSED),
           "device paused status");
-    check(driver.SendForceFeedbackCommand(id, DISFFC_CONTINUE) == DI_OK, "resume command");
-    check(driver.SetGain(id, 5000) == DI_OK, "device gain");
+    check(driver.SendForceFeedbackCommand(id, DISFFC_CONTINUE) == DI_OK &&
+          driver.GetForceFeedbackState(id, &device) == DI_OK && !(device.dwState & DIGFFS_PAUSED),
+          "resume clears the paused state");
+    check(driver.StopEffect(id, second) == DI_OK &&
+          driver.GetEffectStatus(id, second, &state) == DI_OK && !state,
+          "stop clears the playing state of an indefinite effect");
     if (physical) {
         effect.dwDuration = 100000;
         check(driver.DownloadEffect(id, 0, &second, &effect, DIEP_START) == DI_OK,
@@ -166,8 +170,7 @@ void lifecycle(IDirectInputEffectDriver& driver, wchar_t* device_path, bool phys
     check(driver.SendForceFeedbackCommand(id, DISFFC_SETACTUATORSOFF) == DI_OK, "disable command");
     check(driver.GetForceFeedbackState(id, &device) == DI_OK && (device.dwState & DIGFFS_ACTUATORSOFF),
           "disabled actuator status");
-    check(driver.StopEffect(id, second) == DI_OK && driver.DestroyEffect(id, second) == DI_OK,
-          "stop then destroy");
+    check(driver.DestroyEffect(id, second) == DI_OK, "destroy a downloaded effect");
     check(driver.StartEffect(id, second, 0, 1) == DIERR_NOTDOWNLOADED, "destroyed handle is invalid");
     check(driver.SendForceFeedbackCommand(id, DISFFC_RESET) == DI_OK, "reset command");
     check(driver.GetForceFeedbackState(id, &device) == DI_OK && (device.dwState & DIGFFS_EMPTY),

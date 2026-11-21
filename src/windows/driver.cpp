@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cmath>
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
@@ -562,9 +561,10 @@ public:
             return DIERR_INVALIDPARAM;
         }
         return with(id, [&](Mixer& mixer, Time time) {
-            state->dwLoad = mixer.size() * 100 / Mixer::capacity;
+            const auto loaded = mixer.size();
+            state->dwLoad = loaded * 100 / Mixer::capacity;
             state->dwState = mixer.enabled() ? DIGFFS_ACTUATORSON : DIGFFS_ACTUATORSOFF;
-            if (!mixer.size()) state->dwState |= DIGFFS_EMPTY;
+            if (!loaded) state->dwState |= DIGFFS_EMPTY;
             if (!mixer.active(time)) state->dwState |= DIGFFS_STOPPED;
             if (mixer.paused()) state->dwState |= DIGFFS_PAUSED;
             return DI_OK;
@@ -634,10 +634,11 @@ public:
         }
         *status = 0;
         return with(id, [&](Mixer& mixer, Time time) -> HRESULT {
-            if (!mixer.contains(effect)) {
+            const auto playing = mixer.playing(effect, time);
+            if (!playing.has_value()) {
                 return DIERR_NOTDOWNLOADED;
             }
-            *status = mixer.playing(effect, time) ? DIEGES_PLAYING : 0;
+            *status = *playing ? DIEGES_PLAYING : 0;
             return DI_OK;
         });
     }
