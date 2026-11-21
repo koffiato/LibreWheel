@@ -52,8 +52,11 @@ public:
     HANDLE ready() const noexcept { return event_.get(); }
     void begin();
     std::optional<Input> take();
+    std::optional<unsigned> take_steering();
 
 private:
+    bool take_report();
+    unsigned usage(unsigned short id);
     struct FreePreparsed { void operator()(void*) const noexcept; };
     Handle file_;
     Handle event_;

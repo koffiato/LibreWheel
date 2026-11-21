@@ -32,6 +32,8 @@ private:
     Handle stop_;
     MailboxView mailbox_;
     Handle process_;
+    ULONGLONG last_signal_ = 0;
+    std::uint8_t last_force_ = 0x80;
 };
 
 } // namespace lw::win

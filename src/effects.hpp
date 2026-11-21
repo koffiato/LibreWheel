@@ -48,6 +48,10 @@ class Mixer {
 public:
     static constexpr unsigned capacity = 32;
     using Id = std::uint32_t;
+    struct Sample {
+        double force;
+        bool active;
+    };
 
     Id add(const Effect& effect) noexcept;
     bool update(Id id, const Effect& effect, Time now) noexcept;
@@ -66,7 +70,7 @@ public:
     void set_enabled(bool enabled) noexcept;
     bool enabled() const noexcept;
     void set_gain(double gain) noexcept;
-    double sample(Time now, const Motion& motion) noexcept;
+    Sample sample(Time now, const Motion& motion) noexcept;
 
 private:
     struct Slot {
@@ -77,10 +81,14 @@ private:
     };
     Time clock_at(Time now) const noexcept;
     static bool playing_at(const Slot& slot, Time now) noexcept;
+    std::uint32_t slot_bit(const Slot& slot) const noexcept;
+    void stop_slot(Slot& slot) noexcept;
     Slot* find(Id id) noexcept;
     const Slot* find(Id id) const noexcept;
 
+    static_assert(capacity <= 32);
     std::array<Slot, capacity> slots_{};
+    std::uint32_t started_slots_ = 0;
     Id next_id_ = 1;
     double gain_ = 1;
     bool enabled_ = true;

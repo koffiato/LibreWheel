@@ -113,7 +113,16 @@ bool OutputLease::publish(std::uint8_t force) noexcept {
     if (WaitForSingleObject(process_.get(), 0) != WAIT_TIMEOUT) {
         return false;
     }
-    InterlockedExchange64(&mailbox_->latest, frame(force));
+    const auto current = frame(force);
+    InterlockedExchange64(&mailbox_->latest, current);
+    const auto tick = static_cast<ULONGLONG>(current) >> 8;
+    // Keep the older broker alive too. A new force byte always wakes it immediately.
+    constexpr auto heartbeat_ms = lease_timeout_ms / 3;
+    if (force == last_force_ && tick - last_signal_ < heartbeat_ms) {
+        return true;
+    }
+    last_force_ = force;
+    last_signal_ = tick;
     return SetEvent(changed_.get()) != FALSE;
 }
 

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <sstream>
@@ -89,14 +90,20 @@ void lifecycle() {
     effect.parameters = Constant{0.75};
     const auto finite = mixer.add(effect);
     check(mixer.start(finite, 0ms, 2), "start finite effect");
-    equal(mixer.sample(4ms, {}), 0, "start delay");
-    equal(mixer.sample(5ms, {}), 0.75, "play after start delay");
-    equal(mixer.sample(25ms, {}), 0.75, "second iteration starts immediately");
+    const auto delayed = mixer.sample(4ms, {});
+    equal(delayed.force, 0, "start delay");
+    check(delayed.active, "delayed effect keeps the mixer scheduled");
+    equal(mixer.sample(5ms, {}).force, 0.75, "play after start delay");
+    equal(mixer.sample(25ms, {}).force, 0.75, "second iteration starts immediately");
     mixer.pause(26ms);
-    equal(mixer.sample(500ms, {}), 0, "pause suppresses output");
+    const auto paused = mixer.sample(500ms, {});
+    equal(paused.force, 0, "pause suppresses output");
+    check(!paused.active, "pause leaves output idle");
     mixer.resume(500ms);
-    equal(mixer.sample(518ms, {}), 0.75, "continue preserves phase");
-    equal(mixer.sample(519ms, {}), 0, "last iteration expired");
+    equal(mixer.sample(518ms, {}).force, 0.75, "continue preserves phase");
+    const auto expired = mixer.sample(519ms, {});
+    equal(expired.force, 0, "last iteration expired");
+    check(!expired.active && !mixer.active(519ms), "expiration clears active state");
     check(!mixer.playing(finite, 520ms), "expired effect status");
 
     effect.duration = 100ms;
@@ -111,21 +118,26 @@ void lifecycle() {
     mixer.start(first, 520ms, repeat_forever);
     mixer.start(second, 520ms, repeat_forever);
     mixer.set_gain(0.25);
-    equal(mixer.sample(521ms, {}), 0.5, "effects are summed before global gain");
+    equal(mixer.sample(521ms, {}).force, 0.5, "effects are summed before global gain");
     mixer.set_enabled(false);
-    equal(mixer.sample(522ms, {}), 0, "actuators off");
+    equal(mixer.sample(522ms, {}).force, 0, "actuators off");
     check(mixer.playing(first, 522ms), "muted effects continue timing");
     mixer.set_enabled(true);
     mixer.start(second, 523ms, 1, true);
-    equal(mixer.sample(523ms, {}), 0.25, "solo stops other effects");
+    equal(mixer.sample(523ms, {}).force, 0.25, "solo stops other effects");
     check(mixer.erase(second), "destroy active effect");
-    equal(mixer.sample(524ms, {}), 0, "destroy silences output");
+    equal(mixer.sample(524ms, {}).force, 0, "destroy silences output");
     mixer.reset();
     check(mixer.size() == 0 && !mixer.contains(first), "reset unloads effects");
+    Mixer::Id last = 0;
     for (unsigned n = 0; n < Mixer::capacity; ++n) {
-        check(mixer.add(effect) != 0, "allocate slot");
+        last = mixer.add(effect);
+        check(last != 0, "allocate slot");
     }
     check(mixer.add(effect) == 0, "fixed maximum effect count");
+    check(mixer.start(last, 525ms, 1) && mixer.sample(525ms, {}).active, "last slot can play");
+    mixer.stop_all();
+    check(!mixer.sample(526ms, {}).active, "stop all clears the last slot");
 }
 
 void correction() {
@@ -172,6 +184,49 @@ void lut_selection() {
           "older settings gain the LUT keys");
 }
 
+void live_lut() {
+    const std::filesystem::path fixture = "lut-reload-test";
+    if (!std::filesystem::create_directory(fixture)) {
+        check(false, "create LUT reload fixture");
+        return;
+    }
+    const auto ini = fixture / "settings.ini";
+    const auto first_curve = fixture / "first.csv";
+    const auto second_curve = fixture / "second.lut";
+    struct Cleanup {
+        std::array<std::filesystem::path, 4> paths;
+        ~Cleanup() {
+            for (const auto& path : paths) {
+                std::error_code error;
+                std::filesystem::remove(path, error);
+            }
+        }
+    } cleanup{{ini, first_curve, second_curve, fixture}};
+
+    const std::string initial = "gain_percent=50\nlut_enabled=false\nlut_file=first.csv\n";
+    std::ofstream(ini) << initial;
+    std::ofstream(first_curve) << "0,0\n.25,.5\n1,1\n";
+    std::ofstream(second_curve) << "0|0\n.25|.75\n1|1\n";
+    auto settings = load_settings(ini);
+    auto loaded = std::filesystem::last_write_time(ini);
+    auto modified = loaded;
+    const auto select = [&](LutSelection selection) {
+        std::ofstream(ini) << write_lut_selection("gain_percent=10\n", selection);
+        modified += 2s;
+        std::filesystem::last_write_time(ini, modified);
+        return reload_lut(ini, loaded, settings.lut);
+    };
+    check(!reload_lut(ini, loaded, settings.lut), "unchanged INI skips reload");
+    check(select({"first.csv", true}), "enable a curve in a running session");
+    equal(corrected_force(0.5, settings), 0.5, "reload applies the curve at the existing gain");
+    check(select({"second.lut", true}), "switch curves in a running session");
+    equal(corrected_force(0.5, settings), 0.75, "replacement curve applies");
+    check(!select({"missing.csv", true}), "reject a missing replacement curve");
+    equal(corrected_force(0.5, settings), 0.75, "failed reload keeps the previous curve");
+    check(select({"second.lut", false}), "disable the active curve in a running session");
+    equal(corrected_force(0.5, settings), 0.25, "disabling the curve restores linear output");
+}
+
 void protocol() {
     using namespace lw::g29;
     check(native_switch_candidate(vendor_id, compatibility_product_id, 0x1350), "G29 compatibility revision");
@@ -199,6 +254,7 @@ int main() {
     lifecycle();
     correction();
     lut_selection();
+    live_lut();
     protocol();
     return failures != 0;
 }

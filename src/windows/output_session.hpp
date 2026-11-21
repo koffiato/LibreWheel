@@ -51,15 +51,12 @@ bool drive_output(Output& output, OutputSignals signals, OutputMailbox& mailbox,
     auto latest_tick = GetTickCount64();
     while (true) {
         const auto age = GetTickCount64() - latest_tick;
-        if (age >= lease_timeout_ms) {
-            return true;
-        }
-        const auto remaining = lease_timeout_ms - static_cast<DWORD>(age);
+        const auto remaining = age < lease_timeout_ms ? lease_timeout_ms - static_cast<DWORD>(age) : 0;
         const auto wake = WaitForMultipleObjects(3, events, FALSE, remaining);
-        if (wake != WAIT_OBJECT_0 + 2) {
+        if (wake != WAIT_OBJECT_0 + 2 && wake != WAIT_TIMEOUT) {
             return wake != WAIT_FAILED;
         }
-        // CompareExchange is used as an atomic read of the cross-process frame.
+        // A steady force may refresh the shared timestamp without signaling changed.
         const auto latest = static_cast<ULONGLONG>(InterlockedCompareExchange64(&mailbox.latest, 0, 0));
         latest_tick = latest >> 8;
         if (GetTickCount64() - latest_tick >= lease_timeout_ms) {

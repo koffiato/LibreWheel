@@ -30,6 +30,7 @@ std::atomic_long server_locks = 0;
 constexpr DWORD nominal = DI_FFNOMINALMAX;
 constexpr auto sample_period = 4ms;
 constexpr auto maximum_motion_age = 50ms;
+constexpr auto lut_poll_interval = 250ms;
 
 Time now() noexcept { return trace_time(); }
 double level(LONG value) noexcept { return std::clamp(double(value) / nominal, -1.0, 1.0); }
@@ -167,7 +168,7 @@ std::ostream& operator<<(std::ostream& out, const CommandRow& row) {
         << row.trigger_repeat << ',' << row.start_delay << ',' << row.axis << ',' << row.direction << ','
         << (row.envelope.dwSize != 0) << ',' << row.envelope.dwAttackLevel << ',' << row.envelope.dwAttackTime << ','
         << row.envelope.dwFadeLevel << ',' << row.envelope.dwFadeTime << ',';
-    write_trace_bytes(out, row.parameters.data(), row.parameter_size);
+    write_trace_bytes(out, row.parameters, row.parameter_size);
     return out;
 }
 
@@ -247,7 +248,10 @@ public:
         if (!input_->info().classic_output) {
             throw std::runtime_error("The G29 vendor output field is missing");
         }
-        settings_ = load_settings(settings_path());
+        const auto config = settings_path();
+        std::error_code error;
+        const auto modified = std::filesystem::last_write_time(config, error);
+        settings_ = load_settings(config);
 #ifdef LIBREWHEEL_BENCH_OUTPUT
         wchar_t enable[2]{};
         const auto length = GetEnvironmentVariableW(L"LIBREWHEEL_BENCH_OUTPUT", enable, 2);
@@ -263,10 +267,18 @@ public:
                 OutputDebugStringW(L"LibreWheel: unable to start the force-feedback trace\n");
             }
         }
+        try {
+            lut_thread_ = std::jthread([this, config, modified](std::stop_token stop) {
+                watch_lut(stop, config, modified);
+            });
+        } catch (const std::system_error&) {
+            OutputDebugStringW(L"LibreWheel: unable to start the LUT watcher\n");
+        }
         thread_ = std::thread([this] { run(); });
     }
 
     ~Session() {
+        lut_thread_.request_stop();
         {
             std::lock_guard lock(mutex_);
             closing_ = true;
@@ -274,6 +286,9 @@ public:
         wake_.notify_one();
         if (thread_.joinable()) {
             thread_.join();
+        }
+        if (lut_thread_.joinable()) {
+            lut_thread_.join();
         }
         if (trace_) {
             trace_->commands.add({now(), "session_end"});
@@ -300,6 +315,29 @@ public:
     }
 
 private:
+    void watch_lut(std::stop_token stop, const std::filesystem::path& config,
+                   std::filesystem::file_time_type modified) noexcept {
+        try {
+            std::condition_variable_any wake;
+            std::mutex wait_mutex;
+            std::unique_lock wait_lock(wait_mutex);
+            while (!stop.stop_requested()) {
+                std::optional<Lut> next;
+                if (reload_lut(config, modified, next)) {
+                    std::lock_guard lock(mutex_);
+                    if (closing_ || lost_) {
+                        return;
+                    }
+                    settings_.lut.swap(next);
+                    record({now(), "lut_reload", DI_OK, 0, 0, 0, settings_.lut.has_value()});
+                }
+                wake.wait_for(wait_lock, stop, lut_poll_interval, [] { return false; });
+            }
+        } catch (...) {
+            OutputDebugStringW(L"LibreWheel: LUT watcher stopped\n");
+        }
+    }
+
     void track(unsigned steering, Time time) noexcept {
         const double position = steering >= 32768 ? (double(steering) - 32768) / 32767
                                                   : (double(steering) - 32768) / 32768;
@@ -335,11 +373,11 @@ private:
                 // Drain already completed input reports so the force evaluator sees recent steering.
                 // Bound the work in case the device fills the queue faster than we can read it.
                 for (unsigned count = 0; count < 64; ++count) {
-                    const auto input = input_->take();
+                    const auto input = input_->take_steering();
                     if (!input) {
                         break;
                     }
-                    steering = input->steering;
+                    steering = *input;
                     input_->begin();
                 }
                 if (steering) {
@@ -351,10 +389,9 @@ private:
                     // still applies while the outstanding read watches for changes.
                     motion_.derivatives_valid = false;
                 }
-                const auto mixed = mixer_.sample(time, motion_);
+                const auto [mixed, active] = mixer_.sample(time, motion_);
                 const auto corrected = corrected_force(mixed, settings_);
                 const auto force = g29::force_byte(corrected);
-                const bool active = mixer_.active(time) && !mixer_.paused() && mixer_.enabled();
                 if (trace_) {
                     trace_->mix.add({time, steering_raw, steering.has_value(), motion_, active, mixed, corrected, force});
                 }
@@ -409,12 +446,13 @@ private:
     Settings settings_;
     std::unique_ptr<FfbTrace> trace_;
     std::unique_ptr<HidInput> input_;
-    std::thread thread_;
     bool closing_ = false;
     bool lost_ = false;
 #ifdef LIBREWHEEL_BENCH_OUTPUT
     bool output_enabled_ = false;
 #endif
+    std::jthread lut_thread_;
+    std::thread thread_;
 };
 
 class Driver final : public IDirectInputEffectDriver {

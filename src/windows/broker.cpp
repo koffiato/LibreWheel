@@ -29,7 +29,7 @@ struct ReportRow {
 
 std::ostream& operator<<(std::ostream& out, const ReportRow& row) {
     out << row.started.count() << ',' << row.finished.count() << ',' << row.success << ',';
-    write_trace_bytes(out, row.bytes.data(), row.bytes.size());
+    write_trace_bytes(out, row.bytes);
     return out;
 }
 

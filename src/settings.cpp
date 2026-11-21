@@ -203,6 +203,28 @@ Settings load_settings(const std::filesystem::path& path) {
     return settings;
 }
 
+bool reload_lut(const std::filesystem::path& path, std::filesystem::file_time_type& last_loaded,
+                std::optional<Lut>& lut) {
+    std::error_code error;
+    const auto modified = std::filesystem::last_write_time(path, error);
+    if (error || modified == last_loaded) {
+        return false;
+    }
+    try {
+        auto next = load_settings(path).lut;
+        const auto after_read = std::filesystem::last_write_time(path, error);
+        if (error || after_read != modified) {
+            return false;
+        }
+        lut = std::move(next);
+        last_loaded = modified;
+        return true;
+    } catch (const std::runtime_error&) {
+        // Leave the current curve active while a save is incomplete or invalid.
+        return false;
+    }
+}
+
 LutSelection read_lut_selection(std::istream& ini) {
     return parse_settings(ini).selection;
 }

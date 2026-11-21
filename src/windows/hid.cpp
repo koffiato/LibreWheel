@@ -335,15 +335,15 @@ void HidInput::begin() {
     pending_ = true;
 }
 
-std::optional<Input> HidInput::take() {
+bool HidInput::take_report() {
     if (!pending_) {
-        return std::nullopt;
+        return false;
     }
     DWORD transferred = 0;
     if (!GetOverlappedResult(file_.get(), &operation_, &transferred, FALSE)) {
         const DWORD error = GetLastError();
         if (error == ERROR_IO_INCOMPLETE) {
-            return std::nullopt;
+            return false;
         }
         pending_ = false;
         win_error("Complete G29 input read", error);
@@ -352,21 +352,38 @@ std::optional<Input> HidInput::take() {
     if (transferred != buffer_.size() || buffer_.front() != 0) {
         win_error("Unexpected G29 input report", ERROR_INVALID_DATA);
     }
+    return true;
+}
+
+unsigned HidInput::usage(unsigned short id) {
     const auto descriptor = static_cast<PHIDP_PREPARSED_DATA>(descriptor_.get());
-    const auto usage = [&](USAGE id) {
-        ULONG value = 0;
-        if (HidP_GetUsageValue(HidP_Input, HID_USAGE_PAGE_GENERIC, 0, id, &value, descriptor,
-                              buffer_.data(), transferred) != HIDP_STATUS_SUCCESS) {
-            win_error("Unexpected G29 input descriptor", ERROR_INVALID_DATA);
-        }
-        return value;
-    };
+    ULONG value = 0;
+    if (HidP_GetUsageValue(HidP_Input, HID_USAGE_PAGE_GENERIC, 0, id, &value, descriptor,
+                          buffer_.data(), static_cast<ULONG>(buffer_.size()))
+        != HIDP_STATUS_SUCCESS) {
+        win_error("Unexpected G29 input descriptor", ERROR_INVALID_DATA);
+    }
+    return value;
+}
+
+std::optional<unsigned> HidInput::take_steering() {
+    if (!take_report()) {
+        return std::nullopt;
+    }
+    return usage(HID_USAGE_GENERIC_X);
+}
+
+std::optional<Input> HidInput::take() {
+    if (!take_report()) {
+        return std::nullopt;
+    }
     Input input{usage(HID_USAGE_GENERIC_X), usage(HID_USAGE_GENERIC_Z), usage(HID_USAGE_GENERIC_RZ),
                 usage(HID_USAGE_GENERIC_Y), usage(HID_USAGE_GENERIC_HATSWITCH), 0};
     std::array<USAGE, 25> buttons{};
     ULONG count = static_cast<ULONG>(buttons.size());
+    const auto descriptor = static_cast<PHIDP_PREPARSED_DATA>(descriptor_.get());
     if (HidP_GetUsages(HidP_Input, HID_USAGE_PAGE_BUTTON, 0, buttons.data(), &count,
-                       descriptor, buffer_.data(), transferred) != HIDP_STATUS_SUCCESS) {
+                       descriptor, buffer_.data(), static_cast<ULONG>(buffer_.size())) != HIDP_STATUS_SUCCESS) {
         win_error("Unexpected G29 button descriptor", ERROR_INVALID_DATA);
     }
     for (ULONG index = 0; index < count; ++index) {

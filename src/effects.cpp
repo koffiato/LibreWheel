@@ -2,6 +2,7 @@
 #include "effects.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <numbers>
 
@@ -135,8 +136,8 @@ bool Mixer::update(Id id, const Effect& effect, Time now) noexcept {
     if (!slot) {
         return false;
     }
-    if (!playing_at(*slot, clock_at(now))) {
-        slot->iterations = 0;
+    if (slot->iterations && !playing_at(*slot, clock_at(now))) {
+        stop_slot(*slot);
     }
     slot->effect = effect;
     return true;
@@ -147,6 +148,7 @@ bool Mixer::erase(Id id) noexcept {
     if (!slot) {
         return false;
     }
+    stop_slot(*slot);
     *slot = {};
     return true;
 }
@@ -161,7 +163,17 @@ bool Mixer::start(Id id, Time now, std::uint32_t iterations, bool solo) noexcept
     }
     slot->started = clock_at(now);
     slot->iterations = iterations;
+    started_slots_ |= slot_bit(*slot);
     return true;
+}
+
+std::uint32_t Mixer::slot_bit(const Slot& slot) const noexcept {
+    return std::uint32_t{1} << (&slot - slots_.data());
+}
+
+void Mixer::stop_slot(Slot& slot) noexcept {
+    slot.iterations = 0;
+    started_slots_ &= ~slot_bit(slot);
 }
 
 bool Mixer::stop(Id id) noexcept {
@@ -169,7 +181,7 @@ bool Mixer::stop(Id id) noexcept {
     if (!slot) {
         return false;
     }
-    slot->iterations = 0;
+    stop_slot(*slot);
     return true;
 }
 
@@ -184,7 +196,7 @@ bool Mixer::playing_at(const Slot& slot, Time now) noexcept {
         return false;
     }
     const auto elapsed = now - slot.started - slot.effect.delay;
-    return elapsed < Time::zero() || slot.effect.duration == forever ||
+    return elapsed < slot.effect.duration || slot.effect.duration == forever ||
            slot.iterations == repeat_forever || elapsed / slot.effect.duration < slot.iterations;
 }
 
@@ -194,7 +206,13 @@ bool Mixer::playing(Id id, Time now) const noexcept {
 }
 
 bool Mixer::active(Time now) const noexcept {
-    return std::ranges::any_of(slots_, [&](const Slot& slot) { return playing_at(slot, clock_at(now)); });
+    const auto time = clock_at(now);
+    for (auto slots = started_slots_; slots; slots &= slots - 1) {
+        if (playing_at(slots_[std::countr_zero(slots)], time)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 unsigned Mixer::size() const noexcept {
@@ -202,13 +220,15 @@ unsigned Mixer::size() const noexcept {
 }
 
 void Mixer::stop_all() noexcept {
-    for (auto& slot : slots_) {
-        slot.iterations = 0;
+    for (auto slots = started_slots_; slots; slots &= slots - 1) {
+        slots_[std::countr_zero(slots)].iterations = 0;
     }
+    started_slots_ = 0;
 }
 
 void Mixer::reset() noexcept {
     slots_ = {};
+    started_slots_ = 0;
     paused_at_.reset();
     paused_total_ = Time::zero();
     enabled_ = true;
@@ -232,21 +252,27 @@ void Mixer::set_enabled(bool enabled) noexcept { enabled_ = enabled; }
 bool Mixer::enabled() const noexcept { return enabled_; }
 void Mixer::set_gain(double gain) noexcept { gain_ = std::clamp(gain, 0.0, 1.0); }
 
-double Mixer::sample(Time now, const Motion& motion) noexcept {
+Mixer::Sample Mixer::sample(Time now, const Motion& motion) noexcept {
     double mixed = 0;
+    bool active = false;
+    const bool output = enabled_ && !paused();
     const auto time = clock_at(now);
-    for (auto& slot : slots_) {
+    // Visit only started slots, in slot order so the sum is unchanged.
+    for (auto slots = started_slots_; slots; slots &= slots - 1) {
+        auto& slot = slots_[std::countr_zero(slots)];
         if (!playing_at(slot, time)) {
-            slot.iterations = 0;
+            stop_slot(slot);
             continue;
         }
+        active = output;
         const auto elapsed = time - slot.started - slot.effect.delay;
-        if (elapsed >= Time::zero() && enabled_ && !paused()) {
+        if (elapsed >= Time::zero() && output) {
             const auto duration = slot.effect.duration;
-            mixed += evaluate(slot.effect, duration == forever ? elapsed : elapsed % duration, motion);
+            const auto phase = duration == forever || elapsed < duration ? elapsed : elapsed % duration;
+            mixed += evaluate(slot.effect, phase, motion);
         }
     }
-    return mixed * gain_;
+    return {mixed * gain_, active};
 }
 
 } // namespace lw
