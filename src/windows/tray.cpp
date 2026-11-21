@@ -8,6 +8,7 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <chrono>
 #include <exception>
 #include <fstream>
 #include <sstream>
@@ -210,10 +211,23 @@ void toggle_lut(const std::filesystem::path& file) {
         std::ofstream output(std::filesystem::path(temporary), std::ios::binary);
         output << updated;
         output.close();
-        if (!output || read_settings_text(path) != original ||
-            !MoveFileExW(temporary, path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-            throw std::runtime_error("Unable to replace settings file");
+        if (output) {
+            for (unsigned attempt = 0; attempt < 4; ++attempt) {
+                if (read_settings_text(path) != original) {
+                    break;
+                }
+                if (MoveFileExW(temporary, path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                    return;
+                }
+                const auto error = GetLastError();
+                // A concurrent settings reader can briefly prevent replacement.
+                if ((error != ERROR_SHARING_VIOLATION && error != ERROR_ACCESS_DENIED) || attempt == 3) {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
         }
+        throw std::runtime_error("Unable to replace settings file");
     } catch (...) {
         DeleteFileW(temporary);
         throw;

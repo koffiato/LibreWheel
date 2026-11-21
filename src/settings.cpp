@@ -190,6 +190,7 @@ Settings load_settings(const std::filesystem::path& path) {
         throw std::runtime_error("Unable to open settings file");
     }
     auto [settings, selection] = parse_settings(file);
+    file.close();
     if (selection.enabled) {
         if (selection.file.empty()) {
             throw std::runtime_error("lut_enabled requires lut_file");
