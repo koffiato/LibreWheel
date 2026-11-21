@@ -3,19 +3,22 @@
 #include "settings.hpp"
 #include "tray_resource.h"
 
-#include <cfgmgr32.h>
+#include <dbt.h>
 #include <shellapi.h>
 #include <windowsx.h>
 
 #include <algorithm>
-#include <chrono>
+#include <array>
+#include <cstddef>
 #include <exception>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <system_error>
+#include <string_view>
 #include <thread>
+#include <utility>
 
 namespace {
 
@@ -27,6 +30,7 @@ constexpr UINT icon_id = 1;
 constexpr UINT_PTR icon_retry = 1;
 constexpr UINT tray_callback = WM_APP + 1;
 constexpr UINT show_menu = WM_APP + 2;
+constexpr UINT switch_finished = WM_APP + 3;
 constexpr UINT startup_item = 1;
 constexpr UINT quit_item = 2;
 constexpr UINT first_lut_item = 3;
@@ -47,17 +51,13 @@ bool set_start_with_windows(bool enabled) {
         return result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND;
     }
 
-    std::wstring executable(32768, L'\0');
+    std::array<wchar_t, MAX_PATH> executable{};
     const DWORD length = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
-    if (!length || length >= executable.size()) {
-        return false;
-    }
-    executable.resize(length);
-    const auto command = L'"' + executable + L'"';
     // Windows documents a 260-character limit for commands in the Run key.
-    if (command.size() > MAX_PATH) {
+    if (!length || length > MAX_PATH - 2) {
         return false;
     }
+    const auto command = L'"' + std::wstring(executable.data(), length) + L'"';
     const auto bytes = static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t));
     return RegSetKeyValueW(HKEY_CURRENT_USER, run_key, run_value, REG_SZ, command.c_str(), bytes) == ERROR_SUCCESS;
 }
@@ -76,12 +76,14 @@ const wchar_t* detected_wheel() {
     }
 }
 
-void switch_to_native(HANDLE stop, unsigned retries) noexcept {
+void switch_to_native(std::stop_token stop, unsigned retries) noexcept {
     try {
-        for (unsigned attempt = 0; ; ++attempt) {
-            if (lw::win::initialize_native() || attempt == retries || WaitForSingleObject(stop, 200) != WAIT_TIMEOUT) {
+        for (unsigned attempt = 0; !stop.stop_requested(); ++attempt) {
+            if (lw::win::initialize_native() || attempt == retries) {
                 return;
             }
+            // A new interface can arrive before its HID descriptor can be opened.
+            Sleep(200);
         }
     } catch (const std::exception& error) {
         OutputDebugStringA("LibreWheel native mode switch: ");
@@ -90,25 +92,58 @@ void switch_to_native(HANDLE stop, unsigned retries) noexcept {
     }
 }
 
-DWORD CALLBACK wheel_arrived(HCMNOTIFICATION, void* arrival, CM_NOTIFY_ACTION action,
-                            PCM_NOTIFY_EVENT_DATA data, DWORD) {
-    if (action == CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL &&
-        lw::win::is_compatibility_interface(data->u.DeviceInterface.SymbolicLink)) {
-        SetEvent(arrival);
+class NativeSwitch {
+public:
+    void request(HWND window, unsigned retries) noexcept {
+        if (worker_.joinable()) {
+            pending_ = true;
+            return;
+        }
+        try {
+            worker_ = std::jthread([window, retries](std::stop_token stop) {
+                switch_to_native(stop, retries);
+                if (!stop.stop_requested()) {
+                    PostMessageW(window, switch_finished, 0, 0);
+                }
+            });
+        } catch (const std::exception& error) {
+            OutputDebugStringA(error.what());
+        }
     }
-    return ERROR_SUCCESS;
+
+    void finished(HWND window) {
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+        if (std::exchange(pending_, false)) {
+            request(window, 4);
+        }
+    }
+
+    void stop() noexcept { worker_.request_stop(); }
+
+private:
+    std::jthread worker_;
+    bool pending_ = false;
+};
+
+NativeSwitch& native_switch(HWND window) noexcept {
+    return *reinterpret_cast<NativeSwitch*>(GetWindowLongPtrW(window, GWLP_USERDATA));
 }
 
-void watch_wheel(std::stop_token token, HANDLE stop, HANDLE arrival) {
-    const std::stop_callback signal_stop(token, [stop] { SetEvent(stop); });
-    const HANDLE events[]{stop, arrival};
-    if (!token.stop_requested()) {
-        switch_to_native(stop, 0);
+bool compatibility_arrived(LPARAM data) noexcept {
+    const auto* header = reinterpret_cast<const DEV_BROADCAST_HDR*>(data);
+    if (!header || header->dbch_devicetype != DBT_DEVTYP_DEVICEINTERFACE) {
+        return false;
     }
-    while (WaitForMultipleObjects(2, events, FALSE, INFINITE) == WAIT_OBJECT_0 + 1) {
-        // A new interface can be visible before its HID descriptor can be opened.
-        switch_to_native(stop, 4);
+    const auto* interface = reinterpret_cast<const DEV_BROADCAST_DEVICEINTERFACE_W*>(header);
+    constexpr auto offset = offsetof(DEV_BROADCAST_DEVICEINTERFACE_W, dbcc_name);
+    if (header->dbch_size < offset + sizeof(wchar_t)) {
+        return false;
     }
+    std::wstring_view path(interface->dbcc_name, (header->dbch_size - offset) / sizeof(wchar_t));
+    path = path.substr(0, path.find(L'\0'));
+    return lw::win::is_compatibility_interface(path);
 }
 
 std::string read_settings_text(const std::filesystem::path& path) {
@@ -224,7 +259,7 @@ void toggle_lut(const std::filesystem::path& file) {
                 if ((error != ERROR_SHARING_VIOLATION && error != ERROR_ACCESS_DENIED) || attempt == 3) {
                     break;
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                Sleep(10);
             }
         }
         throw std::runtime_error("Unable to replace settings file");
@@ -253,7 +288,7 @@ void add_icon(HWND window) {
         Shell_NotifyIconW(NIM_SETVERSION, &icon);
         KillTimer(window, icon_retry);
     } else {
-        SetTimer(window, icon_retry, 1000, nullptr);
+        SetTimer(window, icon_retry, 5000, nullptr);
     }
 }
 
@@ -318,6 +353,18 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     }
 
     switch (message) {
+    case WM_NCCREATE:
+        SetWindowLongPtrW(window, GWLP_USERDATA,
+                          reinterpret_cast<LONG_PTR>(reinterpret_cast<const CREATESTRUCTW*>(lparam)->lpCreateParams));
+        break;
+    case WM_DEVICECHANGE:
+        if (wparam == DBT_DEVICEARRIVAL && compatibility_arrived(lparam)) {
+            native_switch(window).request(window, 4);
+        }
+        return TRUE;
+    case switch_finished:
+        native_switch(window).finished(window);
+        return 0;
     case tray_callback:
         switch (LOWORD(lparam)) {
         case WM_CONTEXTMENU:
@@ -343,6 +390,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         }
         return 0;
     case WM_DESTROY: {
+        native_switch(window).stop();
         auto icon = notification(window);
         Shell_NotifyIconW(NIM_DELETE, &icon);
         PostQuitMessage(0);
@@ -384,36 +432,30 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         show_error(nullptr, L"LibreWheel could not register its tray window.");
         return 1;
     }
+    NativeSwitch wheel;
     const auto window = CreateWindowExW(0, window_class, L"LibreWheel", WS_OVERLAPPED,
-                                        0, 0, 0, 0, nullptr, nullptr, instance, nullptr);
+                                        0, 0, 0, 0, nullptr, nullptr, instance, &wheel);
     if (!window) {
         show_error(nullptr, L"LibreWheel could not create its tray window.");
         return 1;
     }
     add_icon(window);
 
-    const auto stop = lw::win::handle(CreateEventW(nullptr, TRUE, FALSE, nullptr));
-    const auto arrival = lw::win::handle(CreateEventW(nullptr, FALSE, FALSE, nullptr));
-    CM_NOTIFY_FILTER filter{};
-    filter.cbSize = sizeof(filter);
-    filter.FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE;
-    filter.u.DeviceInterface.ClassGuid = lw::win::hid_interface_guid();
-    struct DeviceNotification {
-        HCMNOTIFICATION token = nullptr;
-        ~DeviceNotification() { if (token) CM_Unregister_Notification(token); }
-    } notification;
-    std::jthread watcher;
-    try {
-        if (stop && arrival &&
-            CM_Register_Notification(&filter, arrival.get(), wheel_arrived, &notification.token) == CR_SUCCESS) {
-            watcher = std::jthread(watch_wheel, stop.get(), arrival.get());
-        }
-    } catch (const std::system_error& error) {
-        OutputDebugStringA(error.what());
+    DEV_BROADCAST_DEVICEINTERFACE_W filter{};
+    filter.dbcc_size = sizeof(filter);
+    filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
+    filter.dbcc_classguid = lw::win::hid_interface_guid();
+    const std::unique_ptr<void, decltype([](HDEVNOTIFY handle) { UnregisterDeviceNotification(handle); })>
+        notification(RegisterDeviceNotificationW(window, &filter, DEVICE_NOTIFY_WINDOW_HANDLE));
+    if (!notification) {
+        OutputDebugStringW(L"LibreWheel could not register for G29 reconnect notifications.\n");
     }
-    if (!watcher.joinable()) {
-        OutputDebugStringA("LibreWheel could not register for G29 reconnect notifications.\n");
-        switch_to_native(nullptr, 0);
+    try {
+        if (lw::win::compatibility_connected()) {
+            wheel.request(window, 0);
+        }
+    } catch (const std::exception& error) {
+        OutputDebugStringA(error.what());
     }
 
     MSG message{};

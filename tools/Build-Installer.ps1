@@ -2,30 +2,50 @@
 <#
 .SYNOPSIS
 Builds LibreWheel-Setup.exe with the full-range DirectInput drivers and the native tray app.
+.DESCRIPTION
+Supply trained MSVC profile databases to enable PGO for the corresponding drivers.
 .EXAMPLE
 .\tools\Build-Installer.ps1 -InnoCompiler 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
 #>
 [CmdletBinding()]
 param(
     [string] $InnoCompiler = 'ISCC.exe',
-    [string] $CMake = 'cmake.exe'
+    [string] $CMake = 'cmake.exe',
+    [string] $PgoProfileX64,
+    [string] $PgoProfileX86
 )
 
 $ErrorActionPreference = 'Stop'
 $InnoCompiler = (Get-Command $InnoCompiler -CommandType Application).Source
 $CMake = (Get-Command $CMake -CommandType Application).Source
 $root = Split-Path -Parent $PSScriptRoot
+$profiles = @{ x64 = $PgoProfileX64; x86 = $PgoProfileX86 }
+foreach ($architecture in 'x64', 'x86') {
+    if ($profiles[$architecture]) {
+        $profiles[$architecture] = (Resolve-Path -LiteralPath $profiles[$architecture]).Path
+    }
+}
 
 Push-Location -LiteralPath $root
 try {
     foreach ($architecture in 'x64', 'x86') {
         $build = "build/setup-$architecture"
-        & $CMake --preset "full-force-$architecture" -B $build
+        $profile = $profiles[$architecture]
+        $pgoMode = if ($profile) { 'USE' } else { 'OFF' }
+        & $CMake --preset "full-force-$architecture" -B $build "-DLIBREWHEEL_PGO_MODE=$pgoMode" "-DLIBREWHEEL_PGO_PROFILE=$profile"
         if ($LASTEXITCODE -ne 0) { throw "LibreWheel $architecture configuration failed." }
 
         $targets = @('LibreWheelFF')
         if ($architecture -eq 'x64') { $targets += @('LibreWheelTray', 'librewheel') }
-        & $CMake --build $build --config Release --target $targets
+        if ($profile) {
+            & $CMake --build $build --config Release --target $targets 2>&1 |
+                Tee-Object -Variable buildOutput
+            if (($buildOutput -join "`n") -match 'C4961|profile-guided optimizations disabled') {
+                throw "LibreWheel $architecture was built without the requested profile data."
+            }
+        } else {
+            & $CMake --build $build --config Release --target $targets
+        }
         if ($LASTEXITCODE -ne 0) { throw "LibreWheel $architecture build failed." }
     }
 
