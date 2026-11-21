@@ -2,6 +2,7 @@
 #include "driver.hpp"
 
 #include "effects.hpp"
+#include "ffb_trace.hpp"
 #include "hid.hpp"
 #include "settings.hpp"
 #ifdef LIBREWHEEL_BENCH_OUTPUT
@@ -9,9 +10,11 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
+#include <cstring>
 #include <mutex>
 #include <new>
 #include <thread>
@@ -20,7 +23,6 @@ namespace lw::win {
 namespace {
 
 using namespace std::chrono_literals;
-using Clock = std::chrono::steady_clock;
 
 std::atomic_long objects = 0;
 std::atomic_long server_locks = 0;
@@ -29,7 +31,7 @@ constexpr DWORD nominal = DI_FFNOMINALMAX;
 constexpr auto sample_period = 4ms;
 constexpr auto maximum_motion_age = 50ms;
 
-Time now() noexcept { return std::chrono::duration_cast<Time>(Clock::now().time_since_epoch()); }
+Time now() noexcept { return trace_time(); }
 double level(LONG value) noexcept { return std::clamp(double(value) / nominal, -1.0, 1.0); }
 double magnitude(DWORD value) noexcept { return double(std::min(value, nominal)) / nominal; }
 
@@ -119,6 +121,120 @@ HRESULT translate_effect(DWORD type, const DIEFFECT* input, Effect& effect) noex
 
 namespace {
 
+struct CommandRow {
+    Time time{};
+    const char* command;
+    HRESULT status = DI_OK;
+    DWORD handle = 0;
+    DWORD type = 0;
+    DWORD flags = 0;
+    DWORD value = 0;
+    DWORD effect_flags = 0;
+    DWORD duration = 0;
+    DWORD sample_period = 0;
+    DWORD gain = 0;
+    DWORD trigger = 0;
+    DWORD trigger_repeat = 0;
+    DWORD start_delay = 0;
+    DWORD axis = 0;
+    LONG direction = 0;
+    DIENVELOPE envelope{};
+    std::array<std::uint8_t, sizeof(DICONDITION)> parameters{};
+    DWORD parameter_size = 0;
+
+    void set_effect(const DIEFFECT& input) noexcept {
+        effect_flags = input.dwFlags;
+        duration = input.dwDuration;
+        sample_period = input.dwSamplePeriod;
+        gain = input.dwGain;
+        trigger = input.dwTriggerButton;
+        trigger_repeat = input.dwTriggerRepeatInterval;
+        start_delay = input.dwSize == sizeof(DIEFFECT) ? input.dwStartDelay : 0;
+        axis = *input.rgdwAxes;
+        direction = *input.rglDirection;
+        if (input.lpEnvelope && type <= 6) {
+            envelope = *input.lpEnvelope;
+        }
+        parameter_size = input.cbTypeSpecificParams;
+        std::memcpy(parameters.data(), input.lpvTypeSpecificParams, parameter_size);
+    }
+};
+
+std::ostream& operator<<(std::ostream& out, const CommandRow& row) {
+    out << row.time.count() << ',' << row.command << ',' << row.status << ',' << row.handle << ','
+        << row.type << ',' << row.flags << ',' << row.value << ',' << row.effect_flags << ','
+        << row.duration << ',' << row.sample_period << ',' << row.gain << ',' << row.trigger << ','
+        << row.trigger_repeat << ',' << row.start_delay << ',' << row.axis << ',' << row.direction << ','
+        << (row.envelope.dwSize != 0) << ',' << row.envelope.dwAttackLevel << ',' << row.envelope.dwAttackTime << ','
+        << row.envelope.dwFadeLevel << ',' << row.envelope.dwFadeTime << ',';
+    write_trace_bytes(out, row.parameters.data(), row.parameter_size);
+    return out;
+}
+
+struct MixRow {
+    Time time;
+    int steering;
+    bool new_report;
+    Motion motion;
+    bool active;
+    double mixed;
+    double corrected;
+    std::uint8_t force;
+};
+
+std::ostream& operator<<(std::ostream& out, const MixRow& row) {
+    return out << row.time.count() << ',' << row.steering << ',' << row.new_report << ','
+               << row.motion.position << ',' << row.motion.velocity << ',' << row.motion.acceleration << ','
+               << row.motion.derivatives_valid << ',' << row.active << ',' << row.mixed << ','
+               << row.corrected << ',' << unsigned(row.force);
+}
+
+class FfbTrace {
+public:
+    explicit FfbTrace(const Settings& settings) {
+        const auto dir = settings_path().parent_path() / L"logs";
+        std::filesystem::create_directories(dir);
+        prefix_ = dir / (L"ffb-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                         std::to_wstring(now().count()));
+        commands.add({now(), "session_start", DI_OK, 0, 0, 0, settings.lut.has_value()});
+    }
+
+    ~FfbTrace() {
+        try {
+            commands.write(file(L"-commands.csv"),
+                "time_us,command,hresult,handle,type,flags,value,effect_flags,duration_us,sample_period_us,"
+                "effect_gain,trigger_button,trigger_repeat_us,start_delay_us,axis,direction,"
+                "has_envelope,attack_level,attack_us,fade_level,fade_us,parameters_hex_le");
+            mix.write(file(L"-mix.csv"),
+                "time_us,steering_raw,new_report,position,velocity,acceleration,derivatives_valid,"
+                "active,mixed,corrected,force_byte");
+        } catch (...) {
+            OutputDebugStringW(L"LibreWheel: unable to write the force-feedback session trace\n");
+        }
+    }
+
+    std::filesystem::path next_usb_log() noexcept {
+        try {
+            return file(L"-usb-" + std::to_wstring(++leases_) + L".csv");
+        } catch (...) {
+            return {};
+        }
+    }
+
+    TraceBuffer<CommandRow> commands;
+    TraceBuffer<MixRow> mix;
+
+private:
+    std::filesystem::path file(const std::wstring& suffix) const {
+        auto path = prefix_;
+        path += suffix;
+        return path;
+    }
+
+    std::filesystem::path prefix_;
+    unsigned leases_ = 0;
+};
+
 class Session {
 public:
     explicit Session(const std::wstring& path) {
@@ -140,6 +256,13 @@ public:
 #endif
         output_enabled_ |= length == 1 && enable[0] == L'1';
 #endif
+        if (settings_.log_ffb) {
+            try {
+                trace_ = std::make_unique<FfbTrace>(settings_);
+            } catch (...) {
+                OutputDebugStringW(L"LibreWheel: unable to start the force-feedback trace\n");
+            }
+        }
         thread_ = std::thread([this] { run(); });
     }
 
@@ -152,6 +275,9 @@ public:
         if (thread_.joinable()) {
             thread_.join();
         }
+        if (trace_) {
+            trace_->commands.add({now(), "session_end"});
+        }
     }
 
     template<class Call> HRESULT access(Call&& call) {
@@ -162,6 +288,15 @@ public:
         const auto result = call(mixer_, now());
         wake_.notify_one();
         return result;
+    }
+
+    void record(CommandRow row, const DIEFFECT* effect = nullptr) noexcept {
+        if (trace_) {
+            if (effect) {
+                row.set_effect(*effect);
+            }
+            trace_->commands.add(row);
+        }
     }
 
 private:
@@ -192,6 +327,7 @@ private:
         std::unique_lock lock(mutex_);
         try {
             std::uint8_t previous = 0x80;
+            int steering_raw = -1;
             input_->begin();
             while (!closing_) {
                 const auto time = now();
@@ -208,6 +344,7 @@ private:
                 }
                 if (steering) {
                     track(*steering, time);
+                    steering_raw = static_cast<int>(*steering);
                 }
                 if (time - input_time_ > maximum_motion_age) {
                     // A stationary G29 can stop sending reports. Its last position
@@ -215,8 +352,12 @@ private:
                     motion_.derivatives_valid = false;
                 }
                 const auto mixed = mixer_.sample(time, motion_);
-                const auto force = g29::force_byte(corrected_force(mixed, settings_));
+                const auto corrected = corrected_force(mixed, settings_);
+                const auto force = g29::force_byte(corrected);
                 const bool active = mixer_.active(time) && !mixer_.paused() && mixer_.enabled();
+                if (trace_) {
+                    trace_->mix.add({time, steering_raw, steering.has_value(), motion_, active, mixed, corrected, force});
+                }
 #ifdef LIBREWHEEL_BENCH_OUTPUT
                 if (output && time - last_tick > std::chrono::milliseconds(lease_timeout_ms)) {
                     throw std::runtime_error("Mixer deadline missed");
@@ -225,7 +366,8 @@ private:
                     output.reset();
                 }
                 if (output_enabled_ && active && !output && force != 0x80) {
-                    output = std::make_unique<OutputLease>(input_->info().path, settings_.range.value_or(0));
+                    const auto log = trace_ ? trace_->next_usb_log() : std::filesystem::path{};
+                    output = std::make_unique<OutputLease>(input_->info().path, settings_.range.value_or(0), log);
                     last_tick = now();
                     // Recompute after process startup, which may outlast the effect.
                     continue;
@@ -254,6 +396,7 @@ private:
         } catch (...) {
             mixer_.stop_all();
             lost_ = true;
+            record({now(), "session_lost", DIERR_INPUTLOST});
             OutputDebugStringW(L"LibreWheel: session ended after a G29 I/O or timing error\n");
         }
     }
@@ -264,6 +407,7 @@ private:
     Motion motion_;
     Time input_time_{};
     Settings settings_;
+    std::unique_ptr<FfbTrace> trace_;
     std::unique_ptr<HidInput> input_;
     std::thread thread_;
     bool closing_ = false;
@@ -348,17 +492,20 @@ public:
         return DI_OK;
     }
 
-    HRESULT STDMETHODCALLTYPE Escape(DWORD, DWORD, LPDIEFFESCAPE) override { return DIERR_UNSUPPORTED; }
+    HRESULT STDMETHODCALLTYPE Escape(DWORD id, DWORD effect, LPDIEFFESCAPE) override {
+        return reject_command(id, {{}, "escape", DIERR_UNSUPPORTED, effect});
+    }
 
     HRESULT STDMETHODCALLTYPE SetGain(DWORD id, DWORD gain) override {
-        return with(id, [&](Mixer& mixer, Time) {
+        return with_command(id, {{}, "set_gain", DI_OK, 0, 0, 0, gain}, [&](Mixer& mixer, Time) {
             mixer.set_gain(magnitude(gain));
             return DI_OK;
         });
     }
 
     HRESULT STDMETHODCALLTYPE SendForceFeedbackCommand(DWORD id, DWORD command) override {
-        return with(id, [&](Mixer& mixer, Time time) -> HRESULT {
+        return with_command(id, {{}, "device_command", DI_OK, 0, 0, 0, command},
+                            [&](Mixer& mixer, Time time) -> HRESULT {
             switch (command) {
             case DISFFC_RESET: mixer.reset(); break;
             case DISFFC_STOPALL: mixer.stop_all(); break;
@@ -388,15 +535,18 @@ public:
 
     HRESULT STDMETHODCALLTYPE DownloadEffect(DWORD id, DWORD type, DWORD* handle,
                                              const DIEFFECT* input, DWORD flags) override {
+        CommandRow row{{}, "download", DI_OK, 0, type, flags};
         if (!handle) {
-            return DIERR_INVALIDPARAM;
+            row.status = DIERR_INVALIDPARAM;
+            return reject_command(id, row);
         }
         Effect effect;
         const auto status = translate_effect(type, input, effect);
         if (FAILED(status)) {
-            return status;
+            row.status = status;
+            return reject_command(id, row);
         }
-        return with(id, [&](Mixer& mixer, Time time) -> HRESULT {
+        return with_command(id, row, [&](Mixer& mixer, Time time) -> HRESULT {
             if (flags & DIEP_NODOWNLOAD) {
                 return DI_OK;
             }
@@ -413,27 +563,29 @@ public:
                 mixer.start(*handle, time, 1);
             }
             return DI_OK;
-        });
+        }, input, handle);
     }
 
     HRESULT STDMETHODCALLTYPE DestroyEffect(DWORD id, DWORD effect) override {
-        return with(id, [&](Mixer& mixer, Time) -> HRESULT {
+        return with_command(id, {{}, "destroy", DI_OK, effect}, [&](Mixer& mixer, Time) -> HRESULT {
             return mixer.erase(effect) ? DI_OK : DIERR_NOTDOWNLOADED;
         });
     }
 
     HRESULT STDMETHODCALLTYPE StartEffect(DWORD id, DWORD effect, DWORD flags, DWORD iterations) override {
+        CommandRow row{{}, "start", DI_OK, effect, 0, flags, iterations};
         if (!iterations || (flags & ~(DIES_SOLO | DIES_NODOWNLOAD))) {
-            return DIERR_INVALIDPARAM;
+            row.status = DIERR_INVALIDPARAM;
+            return reject_command(id, row);
         }
-        return with(id, [&](Mixer& mixer, Time time) -> HRESULT {
+        return with_command(id, row, [&](Mixer& mixer, Time time) -> HRESULT {
             return mixer.start(effect, time, iterations, (flags & DIES_SOLO) != 0) ?
                 DI_OK : DIERR_NOTDOWNLOADED;
         });
     }
 
     HRESULT STDMETHODCALLTYPE StopEffect(DWORD id, DWORD effect) override {
-        return with(id, [&](Mixer& mixer, Time) -> HRESULT {
+        return with_command(id, {{}, "stop", DI_OK, effect}, [&](Mixer& mixer, Time) -> HRESULT {
             return mixer.stop(effect) ? DI_OK : DIERR_NOTDOWNLOADED;
         });
     }
@@ -456,6 +608,25 @@ private:
     template<class Call> HRESULT with(DWORD id, Call&& call) {
         std::lock_guard lock(mutex_);
         return session_ && id == id_ ? session_->access(call) : DIERR_NOTEXCLUSIVEACQUIRED;
+    }
+
+    template<class Call>
+    HRESULT with_command(DWORD id, CommandRow row, Call&& call, const DIEFFECT* input = nullptr,
+                         const DWORD* handle = nullptr) {
+        return with(id, [&](Mixer& mixer, Time time) {
+            row.time = time;
+            row.status = call(mixer, time);
+            if (handle) {
+                row.handle = *handle;
+            }
+            session_->record(row, input);
+            return row.status;
+        });
+    }
+
+    HRESULT reject_command(DWORD id, CommandRow row) {
+        with_command(id, row, [&](Mixer&, Time) { return row.status; });
+        return row.status;
     }
 
     std::atomic_ulong refs_ = 1;

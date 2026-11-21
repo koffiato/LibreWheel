@@ -149,6 +149,27 @@ void correction() {
             check(false, "invalid LUT rejected");
         } catch (const std::runtime_error&) {}
     }
+
+    std::istringstream assetto_corsa("0|0\n.2|.4\n1|1\n");
+    equal(Lut::read(assetto_corsa).apply(0.4), lut.apply(0.4), "pipe-delimited LUT uses the same interpolation");
+}
+
+void lut_selection() {
+    const std::string original = "\xef\xbb\xbf# setup\r\ngain_percent=70\r\n"
+                                 "lut_enabled =false\r\nlut_file=original.csv\r\ndiagnostics=true";
+    const auto updated = write_lut_selection(original, {"new curve.lut", true});
+    check(updated == "\xef\xbb\xbf# setup\r\ngain_percent=70\r\n"
+                     "lut_enabled =true\r\nlut_file=new curve.lut\r\ndiagnostics=true",
+          "selecting a curve edits only the LUT settings");
+    std::istringstream saved(updated);
+    const auto enabled = read_lut_selection(saved);
+    check(enabled.enabled && enabled.file == "new curve.lut", "selected LUT can be read without loading the curve");
+
+    std::istringstream disabled(write_lut_selection(updated, {enabled.file, false}));
+    const auto unchecked = read_lut_selection(disabled);
+    check(!unchecked.enabled && unchecked.file == enabled.file, "unchecking a LUT preserves the configured filename");
+    check(write_lut_selection("# no LUT keys", {"a.csv", true}) == "# no LUT keys\nlut_enabled=true\nlut_file=a.csv\n",
+          "older settings gain the LUT keys");
 }
 
 void protocol() {
@@ -177,6 +198,7 @@ int main() {
     effects();
     lifecycle();
     correction();
+    lut_selection();
     protocol();
     return failures != 0;
 }

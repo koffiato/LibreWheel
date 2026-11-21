@@ -2,10 +2,11 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('Install', 'Switch', 'Remove', 'Describe')]
+    [ValidateSet('Install', 'InstallOrSwitch', 'Switch', 'Remove', 'Describe')]
     [string] $Action,
     [string] $Dll64,
-    [string] $Dll32
+    [string] $Dll32,
+    [switch] $ValidateOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -87,11 +88,15 @@ function Remove-Owned($Hive, [string] $Path, [string] $Name) {
 if (-not [Environment]::Is64BitOperatingSystem) {
     throw 'LibreWheel targets Windows x64.'
 }
-if ($Action -eq 'Install' -or $Action -eq 'Switch') {
+if ($ValidateOnly -and $Action -eq 'Remove') {
+    throw 'ValidateOnly is for installation and switching.'
+}
+if (-not $ValidateOnly -and $Action -ne 'Remove') {
     $path64 = Get-Dll $Dll64 0x8664
     $path32 = Get-Dll $Dll32 0x014C
 }
-if (-not $PSCmdlet.ShouldProcess('current user, G29 VID_046D&PID_C24F', "$Action DirectInput registration")) {
+if (-not $ValidateOnly -and
+    -not $PSCmdlet.ShouldProcess('current user, G29 VID_046D&PID_C24F', "$Action DirectInput registration")) {
     return
 }
 
@@ -101,6 +106,11 @@ $user32 = [Microsoft.Win32.RegistryKey]::OpenBaseKey('CurrentUser', $views[1])
 $machine = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', $views[0])
 try {
     if ($Action -eq 'Remove') {
+        if (($Dll64 -or $Dll32) -and
+            ((Get-RegValue $user64 "$comKey\InprocServer32" '') -ne $Dll64 -or
+             (Get-RegValue $user32 "$comKey\InprocServer32" '') -ne $Dll32)) {
+            return
+        }
         Remove-Owned $user64 $forceKey 'CLSID'
         Remove-Owned $user64 $axisKey $ownerName
         Remove-Owned $user64 $comKey $ownerName
@@ -108,19 +118,23 @@ try {
         Write-Output 'Removed LibreWheel DirectInput registration for this user.'
         return
     }
+    if ($Action -eq 'InstallOrSwitch') {
+        $Action = if ((Get-RegValue $user64 $forceKey 'CLSID') -eq $class) { 'Switch' } else { 'Install' }
+    }
     if ($Action -eq 'Switch') {
         if ((Get-RegValue $user64 $forceKey 'CLSID') -ne $class -or
             (Get-RegValue $user64 $comKey $ownerName) -ne $class -or
             (Get-RegValue $user32 $comKey $ownerName) -ne $class) {
             throw 'Only an existing LibreWheel installation can switch DLLs.'
         }
-        $server64 = $user64.OpenSubKey("$comKey\InprocServer32", $true)
+        $server64 = $user64.OpenSubKey("$comKey\InprocServer32", (-not $ValidateOnly))
         try {
-            $server32 = $user32.OpenSubKey("$comKey\InprocServer32", $true)
+            $server32 = $user32.OpenSubKey("$comKey\InprocServer32", (-not $ValidateOnly))
             try {
                 if ($null -eq $server64 -or $null -eq $server32) {
                     throw 'LibreWheel is missing one of its registered in-process servers.'
                 }
+                if ($ValidateOnly) { return }
                 $previous64 = $server64.GetValue('')
                 $server64.SetValue('', $path64, $string)
                 try {
@@ -156,6 +170,7 @@ try {
             throw 'The existing steering axis entry does not describe a compatible G29 actuator. It was preserved.'
         }
     }
+    if ($ValidateOnly) { return }
 
     $created = [Collections.Generic.List[object]]::new()
     try {

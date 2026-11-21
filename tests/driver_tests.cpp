@@ -18,6 +18,18 @@ void check(bool success, const char* description) {
     }
 }
 
+void compatibility_arrival() {
+    using lw::win::is_compatibility_interface;
+    check(is_compatibility_interface(LR"(\\?\HID#VID_046D&PID_C294#7&e23ac16&0&0000#{guid})"),
+          "recognize an arriving G29 compatibility interface");
+    check(is_compatibility_interface(LR"(\??\hid#vid_046d&pid_c294&mi_00#instance)"),
+          "recognize the NT namespace form of an interface path");
+    check(!is_compatibility_interface(LR"(\\?\hid#vid_046d&pid_c24f&mi_00#instance)"),
+          "native re-enumeration does not request another mode switch");
+    check(!is_compatibility_interface(LR"(\\?\hid#vid_046d&pid_c2940#instance)"),
+          "a partial product ID is not a compatibility arrival");
+}
+
 void polarity() {
     DWORD axis = DIDFT_ABSAXIS;
     LONG direction = 0;
@@ -187,6 +199,7 @@ int wmain(int argc, wchar_t** argv) {
         }
         return failures != 0;
     }
+    compatibility_arrival();
     polarity();
     check(argc == 2 && exports(argv[1]), "load COM DLL and resolve exports");
     IClassFactory* factory = nullptr;

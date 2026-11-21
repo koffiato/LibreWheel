@@ -20,7 +20,7 @@ using MailboxView = std::unique_ptr<OutputMailbox, Unmap>;
 
 class OutputLease {
 public:
-    OutputLease(const std::wstring& path, unsigned range);
+    OutputLease(const std::wstring& path, unsigned range, const std::filesystem::path& report_log);
     ~OutputLease();
     OutputLease(const OutputLease&) = delete;
     OutputLease& operator=(const OutputLease&) = delete;

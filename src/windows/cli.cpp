@@ -309,7 +309,8 @@ int wmain(int argc, wchar_t** argv) {
                 const auto settings = lw::load_settings(path);
                 std::wcout << path.c_str() << L"\nGain " << settings.gain * 100 << L"%  LUT "
                            << (settings.lut ? L"enabled" : L"disabled") << L"  diagnostics "
-                           << (settings.diagnostics ? L"enabled" : L"disabled") << L"\n";
+                           << (settings.diagnostics ? L"enabled" : L"disabled") << L"  FFB logging "
+                           << (settings.log_ffb ? L"enabled" : L"disabled") << L"\n";
                 if (settings.range) {
                     std::wcout << L"Configured range " << *settings.range << L" degrees\n";
                 }

@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <istream>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -23,9 +24,17 @@ struct Settings {
     std::optional<unsigned> range;
     std::optional<Lut> lut;
     bool diagnostics = false;
+    bool log_ffb = false;
+};
+
+struct LutSelection {
+    std::filesystem::path file;
+    bool enabled = false;
 };
 
 Settings load_settings(const std::filesystem::path& path);
+LutSelection read_lut_selection(std::istream& ini);
+std::string write_lut_selection(std::string ini, const LutSelection& selection);
 double corrected_force(double mixed_force, const Settings& settings) noexcept;
 
 } // namespace lw

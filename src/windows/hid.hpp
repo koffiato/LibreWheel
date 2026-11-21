@@ -9,6 +9,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace lw::win {
@@ -34,6 +35,8 @@ struct Input {
 };
 
 std::vector<DeviceInfo> discover();
+bool compatibility_connected();
+bool is_compatibility_interface(std::wstring_view path) noexcept;
 std::optional<DeviceInfo> initialize_native();
 GUID hid_interface_guid() noexcept;
 std::filesystem::path settings_path();

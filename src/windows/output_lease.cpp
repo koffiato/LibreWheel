@@ -35,7 +35,7 @@ struct DeleteAttributes {
 
 } // namespace
 
-OutputLease::OutputLease(const std::wstring& path, unsigned range) {
+OutputLease::OutputLease(const std::wstring& path, unsigned range, const std::filesystem::path& report_log) {
     SECURITY_ATTRIBUTES inherit{sizeof(inherit), nullptr, TRUE};
     changed_ = handle(CreateEventW(&inherit, FALSE, FALSE, nullptr));
     stop_ = handle(CreateEventW(&inherit, TRUE, FALSE, nullptr));
@@ -65,6 +65,9 @@ OutputLease::OutputLease(const std::wstring& path, unsigned range) {
         command += L" " + encode(inherited_handle);
     }
     command += L" " + std::to_wstring(range) + L" \"" + path + L"\"";
+    if (!report_log.empty()) {
+        command += L" \"" + report_log.wstring() + L"\"";
+    }
 
     SIZE_T bytes = 0;
     InitializeProcThreadAttributeList(nullptr, 1, 0, &bytes);

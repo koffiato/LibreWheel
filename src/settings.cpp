@@ -21,12 +21,11 @@ std::string_view trim(std::string_view line) {
     return line.substr(first, line.find_last_not_of(" \t\r") - first + 1);
 }
 
-std::string_view content(const std::string& line, unsigned number) {
-    std::string_view value = line;
-    if (number == 1 && value.starts_with("\xef\xbb\xbf")) {
-        value.remove_prefix(3);
+std::string_view content(std::string_view line, bool first_line) {
+    if (first_line && line.starts_with("\xef\xbb\xbf")) {
+        line.remove_prefix(3);
     }
-    return trim(value);
+    return trim(line);
 }
 
 template<class T> T number(std::string_view field, std::string_view name) {
@@ -60,7 +59,7 @@ Lut Lut::read(std::istream& csv) {
     std::string line;
     unsigned row = 0;
     while (std::getline(csv, line)) {
-        const auto entry = content(line, ++row);
+        const auto entry = content(line, ++row == 1);
         if (entry.empty() || entry.starts_with('#')) {
             continue;
         }
@@ -68,7 +67,7 @@ Lut Lut::read(std::istream& csv) {
             header = true;
             continue;
         }
-        const auto split = entry.find(',');
+        const auto split = entry.find_first_of(",|");
         if (split == entry.npos || lut.points_.size() >= 4096) {
             throw std::runtime_error("Invalid LUT row " + std::to_string(row));
         }
@@ -102,22 +101,21 @@ double Lut::apply(double force) const noexcept {
     return std::copysign(std::lerp(low, high, (magnitude - from) / (to - from)), force);
 }
 
-Settings load_settings(const std::filesystem::path& path) {
+namespace {
+
+struct ParsedSettings {
     Settings settings;
-    std::ifstream file(path);
-    if (!file) {
-        if (!std::filesystem::exists(path)) {
-            return settings;
-        }
-        throw std::runtime_error("Unable to open settings file");
-    }
+    LutSelection selection;
+};
+
+ParsedSettings parse_settings(std::istream& file) {
+    ParsedSettings parsed;
+    auto& [settings, selection] = parsed;
     std::set<std::string, std::less<>> keys;
-    std::filesystem::path lut_path;
-    bool lut_enabled = false;
     std::string line;
     unsigned line_number = 0;
     while (std::getline(file, line)) {
-        const auto entry = content(line, ++line_number);
+        const auto entry = content(line, ++line_number == 1);
         if (entry.empty() || entry.starts_with('#')) {
             continue;
         }
@@ -143,11 +141,13 @@ Settings load_settings(const std::filesystem::path& path) {
             }
             settings.range = degrees;
         } else if (key == "lut_enabled") {
-            lut_enabled = boolean(value);
+            selection.enabled = boolean(value);
         } else if (key == "lut_file") {
-            lut_path = std::filesystem::path(std::u8string(value.begin(), value.end()));
+            selection.file = std::filesystem::path(std::u8string(value.begin(), value.end()));
         } else if (key == "diagnostics") {
             settings.diagnostics = boolean(value);
+        } else if (key == "log_ffb") {
+            settings.log_ffb = boolean(value);
         } else {
             throw std::runtime_error("Unknown setting " + std::string(key));
         }
@@ -155,17 +155,63 @@ Settings load_settings(const std::filesystem::path& path) {
     if (!file.eof()) {
         throw std::runtime_error("Unable to read settings file");
     }
-    if (lut_enabled) {
-        if (lut_path.empty()) {
+    return parsed;
+}
+
+void replace_setting(std::string& ini, std::string_view key, std::string_view value) {
+    std::size_t start = 0;
+    while (start < ini.size()) {
+        const auto end = ini.find('\n', start);
+        const auto entry = content(std::string_view(ini).substr(start, end - start), start == 0);
+        const auto split = entry.find('=');
+        if (split != entry.npos && trim(entry.substr(0, split)) == key) {
+            const auto previous = entry.substr(split + 1);
+            ini.replace(static_cast<std::size_t>(previous.data() - ini.data()), previous.size(), value);
+            return;
+        }
+        start = end == ini.npos ? ini.size() : end + 1;
+    }
+
+    const auto newline = ini.find("\r\n") != ini.npos ? "\r\n" : "\n";
+    if (!ini.empty() && ini.back() != '\n' && ini != "\xef\xbb\xbf") {
+        ini.append(newline);
+    }
+    ini.append(key).append("=").append(value).append(newline);
+}
+
+} // namespace
+
+Settings load_settings(const std::filesystem::path& path) {
+    std::ifstream file(path);
+    if (!file) {
+        if (!std::filesystem::exists(path)) {
+            return {};
+        }
+        throw std::runtime_error("Unable to open settings file");
+    }
+    auto [settings, selection] = parse_settings(file);
+    if (selection.enabled) {
+        if (selection.file.empty()) {
             throw std::runtime_error("lut_enabled requires lut_file");
         }
-        std::ifstream csv(path.parent_path() / lut_path);
+        std::ifstream csv(path.parent_path() / selection.file);
         if (!csv) {
             throw std::runtime_error("Unable to open LUT file");
         }
         settings.lut = Lut::read(csv);
     }
     return settings;
+}
+
+LutSelection read_lut_selection(std::istream& ini) {
+    return parse_settings(ini).selection;
+}
+
+std::string write_lut_selection(std::string ini, const LutSelection& selection) {
+    const auto filename = selection.file.u8string();
+    replace_setting(ini, "lut_enabled", selection.enabled ? "true" : "false");
+    replace_setting(ini, "lut_file", std::string_view(reinterpret_cast<const char*>(filename.data()), filename.size()));
+    return ini;
 }
 
 double corrected_force(double mixed_force, const Settings& settings) noexcept {

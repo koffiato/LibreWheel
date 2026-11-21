@@ -121,7 +121,19 @@ std::filesystem::path settings_path() {
 
 namespace {
 
-std::vector<std::wstring> paths_for(std::wstring_view prefix) {
+constexpr std::wstring_view compatibility_interface = L"hid#vid_046d&pid_c294";
+
+bool matches_interface(std::wstring_view path, std::wstring_view id) noexcept {
+    if (!path.starts_with(L"\\\\?\\") && !path.starts_with(L"\\??\\")) {
+        return false;
+    }
+    path.remove_prefix(4);
+    const auto length = static_cast<int>(id.size());
+    return path.size() > id.size() && (path[id.size()] == L'&' || path[id.size()] == L'#') &&
+        CompareStringOrdinal(path.data(), length, id.data(), length, TRUE) == CSTR_EQUAL;
+}
+
+std::vector<std::wstring> paths_for(std::wstring_view id) {
     const auto guid = hid_interface_guid();
     const auto devices = SetupDiGetClassDevsW(&guid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
     if (devices == INVALID_HANDLE_VALUE) {
@@ -152,10 +164,7 @@ std::vector<std::wstring> paths_for(std::wstring_view prefix) {
             continue;
         }
         const std::wstring_view path(detail->DevicePath);
-        const int length = static_cast<int>(prefix.size());
-        if (path.size() > prefix.size() &&
-            (path[prefix.size()] == L'&' || path[prefix.size()] == L'#') &&
-            CompareStringOrdinal(path.data(), length, prefix.data(), length, TRUE) == CSTR_EQUAL) {
+        if (matches_interface(path, id)) {
             result.emplace_back(path);
         }
     }
@@ -191,11 +200,26 @@ unsigned compatibility_report_size(HANDLE file) {
     return 0;
 }
 
+std::vector<std::wstring> compatibility_paths() {
+    std::vector<std::wstring> result;
+    for (auto& path : paths_for(compatibility_interface)) {
+        try {
+            const auto file = open(path, 0);
+            if (compatibility_report_size(file.get())) {
+                result.push_back(std::move(path));
+            }
+        } catch (const std::system_error&) {
+            // The device may disappear between enumeration and opening.
+        }
+    }
+    return result;
+}
+
 } // namespace
 
 std::vector<DeviceInfo> discover() {
     std::vector<DeviceInfo> result;
-    for (const auto& path : paths_for(L"\\\\?\\hid#vid_046d&pid_c24f")) {
+    for (const auto& path : paths_for(L"hid#vid_046d&pid_c24f")) {
         try {
             auto file = open(path, 0);
             const Descriptor descriptor(preparsed(file.get()));
@@ -209,6 +233,14 @@ std::vector<DeviceInfo> discover() {
     return result;
 }
 
+bool compatibility_connected() {
+    return !compatibility_paths().empty();
+}
+
+bool is_compatibility_interface(std::wstring_view path) noexcept {
+    return matches_interface(path, compatibility_interface);
+}
+
 std::optional<DeviceInfo> initialize_native() {
     using namespace std::chrono_literals;
 
@@ -220,21 +252,15 @@ std::optional<DeviceInfo> initialize_native() {
         throw std::runtime_error("Connect one G29 before initializing it");
     }
 
-    std::wstring device;
-    for (const auto& path : paths_for(L"\\\\?\\hid#vid_046d&pid_c294")) {
-        const auto file = open(path, 0);
-        if (compatibility_report_size(file.get())) {
-            if (!device.empty()) {
-                throw std::runtime_error("Connect one G29 before initializing it");
-            }
-            device = path;
-        }
-    }
-    if (device.empty()) {
+    const auto compatibility = compatibility_paths();
+    if (compatibility.empty()) {
         return std::nullopt;
     }
+    if (compatibility.size() > 1) {
+        throw std::runtime_error("Connect one G29 before initializing it");
+    }
 
-    const auto file = open(device, GENERIC_WRITE);
+    const auto file = open(compatibility.front(), GENERIC_WRITE);
     const auto report_size = compatibility_report_size(file.get());
     if (!report_size) {
         throw std::runtime_error("G29 compatibility collection changed during initialization");
