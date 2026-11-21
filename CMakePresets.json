@@ -1,0 +1,63 @@
+{
+  "version": 5,
+  "configurePresets": [
+    {
+      "name": "x64",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/x64"
+    },
+    {
+      "name": "x86",
+      "inherits": "x64",
+      "architecture": "Win32",
+      "binaryDir": "${sourceDir}/build/x86"
+    },
+    {
+      "name": "bench-x64",
+      "inherits": "x64",
+      "binaryDir": "${sourceDir}/build/bench-x64",
+      "cacheVariables": { "LIBREWHEEL_BENCH_OUTPUT": "ON" }
+    },
+    {
+      "name": "bench-x86",
+      "inherits": "x86",
+      "binaryDir": "${sourceDir}/build/bench-x86",
+      "cacheVariables": { "LIBREWHEEL_BENCH_OUTPUT": "ON" }
+    },
+    {
+      "name": "full-force-x64",
+      "inherits": "bench-x64",
+      "binaryDir": "${sourceDir}/build/full-force-x64",
+      "cacheVariables": { "LIBREWHEEL_FULL_FORCE": "ON" }
+    },
+    {
+      "name": "full-force-x86",
+      "inherits": "bench-x86",
+      "binaryDir": "${sourceDir}/build/full-force-x86",
+      "cacheVariables": { "LIBREWHEEL_FULL_FORCE": "ON" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "x64", "configurePreset": "x64", "configuration": "Release" },
+    { "name": "x86", "configurePreset": "x86", "configuration": "Release" },
+    { "name": "bench-x64", "configurePreset": "bench-x64", "configuration": "Release" },
+    { "name": "bench-x86", "configurePreset": "bench-x86", "configuration": "Release" },
+    { "name": "full-force-x64", "configurePreset": "full-force-x64", "configuration": "Release" },
+    { "name": "full-force-x86", "configurePreset": "full-force-x86", "configuration": "Release" }
+  ],
+  "testPresets": [
+    {
+      "name": "x64",
+      "configurePreset": "x64",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "x86",
+      "configurePreset": "x86",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}
