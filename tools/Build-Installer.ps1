@@ -9,16 +9,46 @@ Supply trained MSVC profile databases to enable PGO for the corresponding driver
 #>
 [CmdletBinding()]
 param(
-    [string] $InnoCompiler = 'ISCC.exe',
-    [string] $CMake = 'cmake.exe',
+    [string] $InnoCompiler,
+    [string] $CMake,
     [string] $PgoProfileX64,
     [string] $PgoProfileX86,
     [switch] $SkipTests
 )
 
 $ErrorActionPreference = 'Stop'
-$InnoCompiler = (Get-Command $InnoCompiler -CommandType Application).Source
-$CMake = (Get-Command $CMake -CommandType Application).Source
+
+function Resolve-Tool([string] $Requested, [string] $Name, [string[]] $FallbackPaths) {
+    if ($Requested) {
+        return (Get-Command $Requested -CommandType Application).Source
+    }
+    $onPath = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue
+    if ($onPath) {
+        return $onPath.Source
+    }
+    foreach ($candidate in $FallbackPaths) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+            return $candidate
+        }
+    }
+    throw "Could not locate $Name. Install it or pass its explicit path."
+}
+
+$vsCMake = $null
+$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+if (Test-Path -LiteralPath $vswhere) {
+    $vsRoot = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    if ($vsRoot) {
+        $vsCMake = Join-Path $vsRoot 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
+    }
+}
+
+$InnoCompiler = Resolve-Tool $InnoCompiler 'ISCC.exe' @(
+    "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+    "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+)
+$CMake = Resolve-Tool $CMake 'cmake.exe' @($vsCMake)
 $CTest = Join-Path (Split-Path -Parent $CMake) 'ctest.exe'
 if (-not $SkipTests -and -not (Test-Path -LiteralPath $CTest)) {
     $CTest = (Get-Command 'ctest.exe' -CommandType Application).Source
@@ -67,7 +97,13 @@ try {
 
     & $InnoCompiler "/DAppVersion=$version" (Join-Path $PSScriptRoot 'LibreWheel.iss')
     if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compilation failed.' }
-    Get-Item -LiteralPath 'build/installer/LibreWheel-Setup.exe'
+    $installer = Get-Item -LiteralPath 'build/installer/LibreWheel-Setup.exe'
+    $hash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    $checksumFile = Join-Path $installer.DirectoryName 'SHA256SUMS.txt'
+    "$hash *$($installer.Name)" | Set-Content -LiteralPath $checksumFile -Encoding ascii
+    Write-Output "Built LibreWheel $version installer: $($installer.FullName)"
+    Write-Output "SHA-256: $hash (saved to $checksumFile)"
+    $installer
 } finally {
     Pop-Location
 }

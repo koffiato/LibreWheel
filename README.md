@@ -4,6 +4,13 @@ LibreWheel is an experimental Windows driver for the Logitech G29. It uses the n
 
 > **Experimental Status:** Game compatibility and torque shutdown behavior under USB or host failure remain experimental. Review the [architecture and protocol evidence](docs/architecture.md) before use. This project assumes no liability for hardware damage.
 
+## Installer (Recommended)
+
+Run `LibreWheel-Setup.exe` to install the full-range 64-bit and 32-bit drivers, `LibreWheelTray.exe`, and `librewheel.exe` per-user into `%LOCALAPPDATA%\Programs\LibreWheel` (default config and LUT files are copied to `%LOCALAPPDATA%\LibreWheel` if absent).
+
+* **Logitech/OEM Registry Conflict Detection:** If an existing Logitech or other third-party G29 `OEMForceFeedback` registry entry is detected (in `HKLM` or `HKCU`), the installer warns that LibreWheel force feedback will not work while it remains and offers to back it up (`%LOCALAPPDATA%\LibreWheel\backups\`) and remove it. Removing a machine-wide (`HKLM`) entry prompts for Administrator permission (UAC); choosing to keep the existing entry installs the files without registering LibreWheel. For silent installs, pass `/REMOVELOGITECH` to opt into automatic backup and removal.
+* **Uninstall:** Uninstall from Windows Settings (*Installed apps*) after closing games; LibreWheel's per-user COM/DirectInput registration and startup entry are cleaned up automatically without touching user config or backups.
+
 ## Build and Test
 
 **Prerequisites:** Visual Studio 2022 (or Build Tools for Visual Studio 2022) with the *Desktop development with C++* workload, a Windows SDK, and CMake 3.24 or newer.
@@ -31,7 +38,7 @@ Each `build/<preset>/Release` directory produces `LibreWheelFF.dll`, `librewheel
 
 * **CLI (`librewheel.exe`):** Raw HID diagnostics (including live input polling rate), DirectInput probing, settings checks, steering range control, and pulse tests.
 * **Tray (`LibreWheelTray.exe`):** Automatically switches arriving PS3 compatibility-mode G29 wheels to native mode, applies configured `range_degrees` on connect, selects `.csv`/`.lut` curves, warns in the menu if invalid settings/LUTs trigger a linear fallback, respects Windows dark mode and Per-Monitor V2 DPI scaling, opens the config folder, manages Start with Windows, and stops active wheel output when exited.
-* **Installer (`tools/Build-Installer.ps1`):** Builds `full-force-x64` and `full-force-x86` (with optional MSVC PGO profiles), runs `ctest` on both architectures (pass `-SkipTests` to skip), and packages `build/installer/LibreWheel-Setup.exe` via Inno Setup 6 (`tools/LibreWheel.iss`).
+* **Installer (`tools/Build-Installer.ps1`):** Auto-detects Visual Studio CMake and Inno Setup 6, builds `full-force-x64` and `full-force-x86` (with optional MSVC PGO profiles), runs `ctest` on both architectures (pass `-SkipTests` to skip), and outputs `build/installer/LibreWheel-Setup.exe` plus `SHA256SUMS.txt`.
 * **Test suite (`ctest`):** Presets cover `x64`, `x86`, `bench-*`, and `full-force-*`, testing effect scheduling, waveforms and conditions, settings/LUT linear fallback, report encoding, COM DLL loading and lifecycle, FFB trace ring buffering, and both in-process and out-of-process broker IPC shutdown paths.
 
 ## Input and DirectInput Diagnostics
@@ -68,8 +75,8 @@ The registration script requires both the 64-bit and 32-bit DLLs and records the
   -Dll32 .\build\x86\Release\LibreWheelFF.dll
 ```
 
-* The script preserves compatible existing steering actuator entries and refuses to overwrite an OEM FFB registration or an incompatible axis override.
-* Any machine-wide Logitech FFB registration must be removed manually or through its own uninstaller first.
+* The script preserves compatible existing steering actuator entries and refuses to overwrite an OEM FFB registration or an incompatible axis override by default.
+* To inspect or back up and remove a conflicting Logitech/OEM G29 FFB registration from the CLI, use `-Action DetectConflict`, `-Action RemoveExistingOem` (with optional `-Scope User|Machine|All` and `-BackupDir`), or pass `-RemoveExistingOem` alongside `-Action Install` (run elevated for `HKLM` entries). Backups are exported to `%LOCALAPPDATA%\LibreWheel\backups\` before deletion.
 
 **Verify the installation:**
 
@@ -99,10 +106,10 @@ This removes LibreWheel's per-user FFB and COM registrations only. Compiled bina
 
 ## Configuration
 
-Settings are read from `%LOCALAPPDATA%\LibreWheel\settings.ini`. The example configuration defaults to linear output (`lut_enabled=false`) and references the bundled `LibreWheel-G29-Custom.csv` curve.
+Settings are read from `%LOCALAPPDATA%\LibreWheel\settings.ini`. The example configuration defaults to linear output (`lut_enabled=false`) and references the bundled `LibreWheel-G29-Custom.lut` curve.
 
 1. Copy [settings.example.ini](settings.example.ini) to `%LOCALAPPDATA%\LibreWheel\settings.ini`.
-2. Place [LibreWheel-G29-Custom.csv](LibreWheel-G29-Custom.csv) in the same directory.
+2. Place [LibreWheel-G29-Custom.lut](LibreWheel-G29-Custom.lut) in the same directory.
 3. Set `lut_enabled=true` in `settings.ini` (or select a curve from `LibreWheelTray.exe`) to enable LUT correction.
 4. Run `librewheel.exe settings` to print the active config path and verify that it parses cleanly.
 5. Reopen your game to apply configuration or LUT changes.

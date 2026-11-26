@@ -2,11 +2,15 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('Install', 'InstallOrSwitch', 'Switch', 'Remove', 'Describe')]
+    [ValidateSet('Install', 'InstallOrSwitch', 'Switch', 'Remove', 'Describe', 'DetectConflict', 'RemoveExistingOem')]
     [string] $Action,
     [string] $Dll64,
     [string] $Dll32,
-    [switch] $ValidateOnly
+    [switch] $ValidateOnly,
+    [switch] $RemoveExistingOem,
+    [ValidateSet('All', 'User', 'Machine')]
+    [string] $Scope = 'All',
+    [string] $BackupDir = (Join-Path $env:LOCALAPPDATA 'LibreWheel\backups')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -85,17 +89,96 @@ function Remove-Owned($Hive, [string] $Path, [string] $Name) {
     }
 }
 
+function Test-IsAdministrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    [Security.Principal.WindowsPrincipal]::new($identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Resolve-ComServer([string] $Clsid, $User64, $User32, $Machine64, $Machine32) {
+    if (-not $Clsid) { return $null }
+    $path = "Software\Classes\CLSID\$Clsid\InprocServer32"
+    foreach ($hive in $User64, $User32, $Machine64, $Machine32) {
+        try {
+            $value = Get-RegValue $hive $path ''
+            if ($value) { return [string]$value }
+        } catch [Security.SecurityException] {}
+    }
+    $null
+}
+
+function Get-ConflictingOemEntries($User64, $User32, $Machine64, $Machine32) {
+    $entries = [Collections.Generic.List[object]]::new()
+    foreach ($item in @(@{ Name = 'HKLM'; Hive = $Machine64 }, @{ Name = 'HKCU'; Hive = $User64 })) {
+        if (-not (Test-RegKey $item.Hive $forceKey)) { continue }
+        $clsid = [string](Get-RegValue $item.Hive $forceKey 'CLSID')
+        if ($clsid -eq $class) { continue }
+        $server = Resolve-ComServer $clsid $User64 $User32 $Machine64 $Machine32
+        $isLogitech = ($clsid -eq '{1ED6DDBB-0401-4498-A093-7D249203200C}') -or
+            ($server -and ($server -match 'Logitech|LGHUB|LCore|lg_joy'))
+        $entries.Add([pscustomobject]@{
+            Hive = $item.Name
+            Key = "$($item.Name)\$forceKey"
+            Clsid = $clsid
+            Server = $server
+            IsLogitech = $isLogitech
+        })
+    }
+    return ,$entries.ToArray()
+}
+
+function Backup-ForceKey([string] $HiveName, [string] $Directory) {
+    New-Item -ItemType Directory -Force -Path $Directory | Out-Null
+    $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $backupPath = Join-Path $Directory "G29-OEMForceFeedback-$HiveName-$timestamp.reg"
+    $suffix = 1
+    while (Test-Path -LiteralPath $backupPath) {
+        $backupPath = Join-Path $Directory "G29-OEMForceFeedback-$HiveName-$timestamp-$suffix.reg"
+        ++$suffix
+    }
+    $regExe = Join-Path $env:SystemRoot 'System32\reg.exe'
+    $output = & $regExe export "$HiveName\$forceKey" $backupPath /y /reg:64 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $backupPath)) {
+        throw "Could not back up $HiveName\$forceKey before removal: $($output -join ' ')"
+    }
+    $backupPath
+}
+
+function Remove-ConflictingOemEntries($User64, $Machine64, [string] $TargetScope, [string] $Directory) {
+    $targets = @()
+    if ($TargetScope -in 'All', 'Machine') { $targets += @{ Name = 'HKLM'; Hive = $Machine64; RequiresAdmin = $true } }
+    if ($TargetScope -in 'All', 'User') { $targets += @{ Name = 'HKCU'; Hive = $User64; RequiresAdmin = $false } }
+
+    $removed = 0
+    foreach ($target in $targets) {
+        if (-not (Test-RegKey $target.Hive $forceKey)) { continue }
+        if ((Get-RegValue $target.Hive $forceKey 'CLSID') -eq $class) { continue }
+        if ($target.RequiresAdmin -and -not (Test-IsAdministrator)) {
+            throw 'Removing a machine-wide (HKLM) Logitech/OEM G29 force-feedback registration requires Administrator privileges.'
+        }
+        if (-not $PSCmdlet.ShouldProcess("$($target.Name)\$forceKey", 'Back up and remove conflicting Logitech/OEM G29 registration')) {
+            continue
+        }
+        $backup = Backup-ForceKey $target.Name $Directory
+        $target.Hive.DeleteSubKeyTree($forceKey, $false)
+        Write-Output "Backed up $($target.Name)\$forceKey to $backup and removed it."
+        ++$removed
+    }
+    if ($removed -eq 0) {
+        Write-Output 'No conflicting Logitech/OEM G29 force-feedback registration found for the requested scope.'
+    }
+}
+
 if (-not [Environment]::Is64BitOperatingSystem) {
     throw 'LibreWheel targets Windows x64.'
 }
-if ($ValidateOnly -and $Action -eq 'Remove') {
+if ($ValidateOnly -and $Action -in 'Remove', 'DetectConflict', 'RemoveExistingOem') {
     throw 'ValidateOnly is for installation and switching.'
 }
-if (-not $ValidateOnly -and $Action -ne 'Remove') {
+if (-not $ValidateOnly -and $Action -in 'Install', 'InstallOrSwitch', 'Switch') {
     $path64 = Get-Dll $Dll64 0x8664
     $path32 = Get-Dll $Dll32 0x014C
 }
-if (-not $ValidateOnly -and
+if (-not $ValidateOnly -and $Action -in 'Install', 'InstallOrSwitch', 'Switch', 'Remove' -and
     -not $PSCmdlet.ShouldProcess('current user, G29 VID_046D&PID_C24F', "$Action DirectInput registration")) {
     return
 }
@@ -104,7 +187,16 @@ $views = [Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryVi
 $user64 = [Microsoft.Win32.RegistryKey]::OpenBaseKey('CurrentUser', $views[0])
 $user32 = [Microsoft.Win32.RegistryKey]::OpenBaseKey('CurrentUser', $views[1])
 $machine = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', $views[0])
+$machine32 = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', $views[1])
 try {
+    if ($Action -eq 'DetectConflict') {
+        Get-ConflictingOemEntries $user64 $user32 $machine $machine32
+        return
+    }
+    if ($Action -eq 'RemoveExistingOem') {
+        Remove-ConflictingOemEntries $user64 $machine $Scope $BackupDir
+        return
+    }
     if ($Action -eq 'Remove') {
         if (($Dll64 -or $Dll32) -and
             ((Get-RegValue $user64 "$comKey\InprocServer32" '') -ne $Dll64 -or
@@ -118,10 +210,16 @@ try {
         Write-Output 'Removed LibreWheel DirectInput registration for this user.'
         return
     }
+    if ($RemoveExistingOem -and -not $ValidateOnly) {
+        Remove-ConflictingOemEntries $user64 $machine 'All' $BackupDir
+    }
     if ($Action -eq 'InstallOrSwitch') {
         $Action = if ((Get-RegValue $user64 $forceKey 'CLSID') -eq $class) { 'Switch' } else { 'Install' }
     }
     if ($Action -eq 'Switch') {
+        if ((Test-RegKey $machine $forceKey) -and -not ($ValidateOnly -and $RemoveExistingOem)) {
+            throw 'A machine-wide Logitech/OEM G29 force-feedback driver is registered. Re-run with -RemoveExistingOem (as Administrator) or remove it before switching.'
+        }
         if ((Get-RegValue $user64 $forceKey 'CLSID') -ne $class -or
             (Get-RegValue $user64 $comKey $ownerName) -ne $class -or
             (Get-RegValue $user32 $comKey $ownerName) -ne $class) {
@@ -143,6 +241,14 @@ try {
                     $server64.SetValue('', $previous64, $string)
                     throw
                 }
+                $driver = $user64.OpenSubKey($forceKey, $true)
+                if ($null -ne $driver) {
+                    try {
+                        $driver.SetValue('Attributes', (Get-Bytes @(0, 2000, 2000)), $binary)
+                    } finally {
+                        $driver.Dispose()
+                    }
+                }
             } finally {
                 if ($null -ne $server32) { $server32.Dispose() }
             }
@@ -153,12 +259,14 @@ try {
         return
     }
 
-    if (Test-RegKey $machine $forceKey) {
-        throw 'A machine-wide G29 force-feedback driver is registered. Use a clean inbox-HID test installation.'
+    if ((Test-RegKey $machine $forceKey) -and -not ($ValidateOnly -and $RemoveExistingOem)) {
+        throw 'A machine-wide Logitech/OEM G29 force-feedback driver is registered. Re-run with -RemoveExistingOem (as Administrator) or remove it first.'
     }
-    if ((Test-RegKey $user64 $forceKey) -or
-        (Test-RegKey $user64 $comKey) -or (Test-RegKey $user32 $comKey)) {
-        throw 'The G29 registration or LibreWheel COM class is already present. Existing entries were preserved.'
+    if ((Test-RegKey $user64 $forceKey) -and -not ($ValidateOnly -and $RemoveExistingOem)) {
+        throw 'An existing per-user Logitech/OEM G29 force-feedback registration is present. Re-run with -RemoveExistingOem or remove it first.'
+    }
+    if ((Test-RegKey $user64 $comKey) -or (Test-RegKey $user32 $comKey)) {
+        throw 'The LibreWheel COM class is already present. Existing entries were preserved.'
     }
     $reuseAxis = Test-RegKey $user64 $axisKey
     if ($reuseAxis) {
@@ -221,6 +329,7 @@ try {
     }
     Write-Output 'Registered LibreWheel for 64-bit and 32-bit DirectInput clients. Reopen the game after registration.'
 } finally {
+    $machine32.Dispose()
     $machine.Dispose()
     $user32.Dispose()
     $user64.Dispose()
