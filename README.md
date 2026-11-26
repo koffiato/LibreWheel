@@ -29,10 +29,10 @@ Additional presets enable the out-of-process hardware output owner (`LibreWheelO
 
 Each `build/<preset>/Release` directory produces `LibreWheelFF.dll`, `librewheel.exe`, `LibreWheelTray.exe`, and (for `bench-*` / `full-force-*` presets) `LibreWheelOutput.exe`. The DLL architecture must match the target game's process bitness.
 
-* **CLI (`librewheel.exe`):** Raw HID diagnostics, DirectInput probing, settings checks, and pulse tests.
-* **Tray (`LibreWheelTray.exe`):** Automatically switches arriving PS3 compatibility-mode G29 wheels to native mode, toggles `.csv`/`.lut` curves live, and manages Start with Windows.
-* **Installer (`tools/Build-Installer.ps1`):** Builds `full-force-x64` and `full-force-x86` (with optional MSVC PGO profiles) and packages `build/installer/LibreWheel-Setup.exe` via Inno Setup 6 (`tools/LibreWheel.iss`).
-* **Test suite (`ctest`):** Covers effect scheduling, waveforms and conditions, LUT parsing and live reload, report encoding, COM DLL loading and lifecycle, FFB trace ring buffering, and watchdog shutdown paths for the output owner.
+* **CLI (`librewheel.exe`):** Raw HID diagnostics (including live input polling rate), DirectInput probing, settings checks, steering range control, and pulse tests.
+* **Tray (`LibreWheelTray.exe`):** Automatically switches arriving PS3 compatibility-mode G29 wheels to native mode, applies configured `range_degrees` on connect, selects `.csv`/`.lut` curves, warns in the menu if invalid settings/LUTs trigger a linear fallback, respects Windows dark mode and Per-Monitor V2 DPI scaling, opens the config folder, manages Start with Windows, and stops active wheel output when exited.
+* **Installer (`tools/Build-Installer.ps1`):** Builds `full-force-x64` and `full-force-x86` (with optional MSVC PGO profiles), runs `ctest` on both architectures (pass `-SkipTests` to skip), and packages `build/installer/LibreWheel-Setup.exe` via Inno Setup 6 (`tools/LibreWheel.iss`).
+* **Test suite (`ctest`):** Presets cover `x64`, `x86`, `bench-*`, and `full-force-*`, testing effect scheduling, waveforms and conditions, settings/LUT linear fallback, report encoding, COM DLL loading and lifecycle, FFB trace ring buffering, and both in-process and out-of-process broker IPC shutdown paths.
 
 ## Input and DirectInput Diagnostics
 
@@ -50,9 +50,10 @@ Connect the wheel with its physical mode switch set to PS3. The G29 can start wi
 | --- | --- |
 | `native` | Verifies the hardware revision and switches the wheel from `046d:c294` to `046d:c24f`. |
 | `list` | Displays connected native G29 HID collections with revision, input/output report sizes, and classic output availability. |
-| `monitor` | Streams raw steering, three pedal values, POV state, and a 25-bit button mask (paddles and shifter gears appear as ordinary HID buttons). Automatically watches for USB reconnections. |
+| `monitor` | Streams raw steering, three pedal values, POV state, 25-bit button mask, and live input report rate (`Hz`). Automatically watches for USB reconnections. |
 | `directinput` | Lists the physical product, Windows FFB advertisement status, `LibreWheel` registration flag, steering actuator flags, and advertised effects. |
 | `settings` | Prints the active `settings.ini` path and verifies that it (and any enabled LUT) parses cleanly. |
+| `range <40-900>` | Sends a hardware steering operating range (40°–900°) to a connected native G29 when no game holds FFB output. |
 | `pulse <left\|right> [percent]` | Runs a 1-second DirectInput constant-force pulse (1–100%, default 5%) and checks effect start and expiration status. |
 
 ## Register and Remove
@@ -104,13 +105,14 @@ Settings are read from `%LOCALAPPDATA%\LibreWheel\settings.ini`. The example con
 2. Place [LibreWheel-G29-Custom.csv](LibreWheel-G29-Custom.csv) in the same directory.
 3. Set `lut_enabled=true` in `settings.ini` (or select a curve from `LibreWheelTray.exe`) to enable LUT correction.
 4. Run `librewheel.exe settings` to print the active config path and verify that it parses cleanly.
+5. Reopen your game to apply configuration or LUT changes.
 
-LUT changes (`lut_enabled` / `lut_file`) hot-reload automatically during a running session; changes to other settings apply when the game reopens the wheel.
+Settings and LUT curves are loaded once when a game acquires the wheel (they are not live-reloaded mid-session). If `settings.ini` or an enabled LUT file is missing or invalid, the driver falls back to linear output instead of failing force-feedback initialization, and `LibreWheelTray.exe` displays a warning in its menu.
 
 | Key | Description |
 | --- | --- |
 | `gain_percent` | User force multiplier from `0` to `100`. Defaults to `100`. |
-| `range_degrees` | Optional hardware rotation range from `40` to `900`. Sent when a hardware output session initializes. |
+| `range_degrees` | Optional hardware rotation range from `40` to `900`. Sent when a hardware output session initializes and when `LibreWheelTray.exe` detects a native G29 while idle. |
 | `lut_enabled` | Boolean enabling the force-feedback LUT curve. Defaults to `false` for linear output. |
 | `lut_file` | UTF-8 path to the LUT file (`.csv` or `.lut`). Relative paths resolve relative to `settings.ini`. |
 | `diagnostics` | Boolean. Emits torque idle/active transitions to the Windows debug output stream. |
@@ -126,7 +128,7 @@ LUT rows contain comma-delimited (`,`) or pipe-delimited (`|`) normalized input 
 
 ## Scope and Limitations
 
-The registration advertises constant force, ramp, square, sine, triangle, both sawtooths and spring. The evaluator also contains damper, friction and inertia calculations for further bench development. Their derivative scaling and stability are unverified, so the registry does not advertise them. When a hardware output build opens the wheel, the output owner disables the firmware's default centering, leaving game-created spring effects to the mixer. The `DIPROP_AUTOCENTER` toggle, effect triggers, custom forces, non-DirectInput FFB APIs and game-specific compatibility are outside this build's verified functionality.
+The registration advertises constant force, ramp, square, sine, triangle, both sawtooths and spring. The evaluator also contains damper, friction and inertia calculations (see [TODO.md](TODO.md) for the derivative filtering and calibration work required before advertising them). When a hardware output build opens the wheel, the output owner disables the firmware's default centering, leaving game-created spring effects to the mixer. The `DIPROP_AUTOCENTER` toggle, effect triggers, custom forces, non-DirectInput FFB APIs and game-specific compatibility are outside this build's verified functionality.
 
 ## License and Development Notes
 
