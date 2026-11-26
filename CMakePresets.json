@@ -58,6 +58,30 @@
       "configurePreset": "x86",
       "configuration": "Release",
       "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "bench-x64",
+      "configurePreset": "bench-x64",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "bench-x86",
+      "configurePreset": "bench-x86",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "full-force-x64",
+      "configurePreset": "full-force-x64",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "full-force-x86",
+      "configurePreset": "full-force-x86",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true }
     }
   ]
 }

@@ -1,11 +1,14 @@
 ; SPDX-License-Identifier: GPL-3.0-or-later
 #define BuildX64 "..\build\setup-x64\Release"
 #define BuildX86 "..\build\setup-x86\Release"
+#ifndef AppVersion
+#define AppVersion "0.1.0"
+#endif
 
 [Setup]
 AppId={{50A98BE2-BF31-4855-85F5-15C8FC8B1B3C}
 AppName=LibreWheel
-AppVersion=0.1.0
+AppVersion={#AppVersion}
 DefaultDirName={localappdata}\Programs\LibreWheel
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
@@ -57,7 +60,7 @@ begin
   Result := '';
   if not ExecAndCaptureOutput(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
     '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ScriptPath + '" ' + Arguments,
-    '', SW_SHOWNORMAL, ewWaitUntilTerminated, ExitCode, Output) then
+    '', SW_HIDE, ewWaitUntilTerminated, ExitCode, Output) then
   begin
     Result := 'Could not start DirectInput registration. ' + SysErrorMessage(ExitCode);
     Exit;

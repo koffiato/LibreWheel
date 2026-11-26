@@ -55,7 +55,8 @@ public:
         }
     }
 
-    bool send(HidOutput& output, const lw::g29::OutputReport& report) noexcept {
+    template<class Device>
+    bool send(Device& output, const lw::g29::OutputReport& report) noexcept {
         if (!trace_) {
             return output.send(report);
         }
@@ -70,10 +71,22 @@ private:
     std::unique_ptr<TraceBuffer<ReportRow>> trace_;
 };
 
+#ifdef LIBREWHEEL_TEST_BROKER
+struct TestOutput {
+    explicit TestOutput(const std::wstring&) noexcept {}
+    bool send(const lw::g29::OutputReport&) noexcept { return true; }
+};
+constexpr wchar_t broker_mutex_name[] = L"Local\\LibreWheel.Test.Output";
+constexpr wchar_t broker_user_stop_name[] = L"Local\\LibreWheel.Test.Stop";
+#else
+constexpr wchar_t broker_mutex_name[] = L"Global\\LibreWheel.G29.Output";
+constexpr wchar_t broker_user_stop_name[] = L"Local\\LibreWheel.Stop";
+#endif
+
 BrokerExit run(OutputSignals signals, OutputMailbox& mailbox, unsigned range, const std::wstring& path,
                const wchar_t* log) {
     TracedOutput trace(log);
-    const auto owner = handle(CreateMutexW(nullptr, FALSE, output_mutex_name));
+    const auto owner = handle(CreateMutexW(nullptr, FALSE, broker_mutex_name));
     if (!owner) {
         return BrokerExit::device_error;
     }
@@ -90,12 +103,21 @@ BrokerExit run(OutputSignals signals, OutputMailbox& mailbox, unsigned range, co
 #else
     constexpr auto strength = OutputStrength::limited;
 #endif
+#ifdef LIBREWHEEL_TEST_BROKER
+    TestOutput output(path);
+    struct Output {
+        TestOutput& device;
+        TracedOutput& trace;
+        bool send(const lw::g29::OutputReport& report) noexcept { return trace.send(device, report); }
+    } traced_output{output, trace};
+#else
     HidOutput output(path);
     struct Output {
         HidOutput& device;
         TracedOutput& trace;
         bool send(const lw::g29::OutputReport& report) noexcept { return trace.send(device, report); }
     } traced_output{output, trace};
+#endif
     return drive_output(traced_output, signals, mailbox, range, strength);
 }
 
@@ -117,7 +139,7 @@ int wmain(int argc, wchar_t** argv) {
         if (!parent || !changed || !stop || !ready || !mailbox || range > 900) {
             return static_cast<int>(BrokerExit::invalid_args);
         }
-        const auto user_stop = handle(CreateEventW(nullptr, TRUE, FALSE, user_stop_event_name));
+        const auto user_stop = handle(CreateEventW(nullptr, TRUE, FALSE, broker_user_stop_name));
         const OutputSignals signals{parent.get(), changed.get(), stop.get(), ready.get(), user_stop.get()};
         return static_cast<int>(run(signals, *mailbox, static_cast<unsigned>(range), argv[7],
                                     argc == 9 ? argv[8] : nullptr));
