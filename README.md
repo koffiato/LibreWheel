@@ -6,40 +6,46 @@ LibreWheel is an experimental Windows driver for the Logitech G29. It uses the n
 
 ## Installer (Recommended)
 
-Run `LibreWheel-Setup.exe` to install the full-range 64-bit and 32-bit drivers, `LibreWheelTray.exe`, and `librewheel.exe` per-user into `%LOCALAPPDATA%\Programs\LibreWheel` (default config and LUT files are copied to `%LOCALAPPDATA%\LibreWheel` if absent).
+Run `LibreWheel-Setup.exe` (a native C++20 GPL-3.0-or-later self-extracting installer) to install the 64-bit and 32-bit drivers, `LibreWheelTray.exe`, and `librewheel.exe` per-user into `%LOCALAPPDATA%\Programs\LibreWheel` (default config and LUT files are copied to `%LOCALAPPDATA%\LibreWheel` if absent). A matching `LibreWheel-<version>-portable.zip` archive is also produced for manual setup via `Register-LibreWheel.ps1`.
 
-* **Logitech/OEM Registry Conflict Detection:** If an existing Logitech or other third-party G29 `OEMForceFeedback` registry entry is detected (in `HKLM` or `HKCU`), the installer warns that LibreWheel force feedback will not work while it remains and offers to back it up (`%LOCALAPPDATA%\LibreWheel\backups\`) and remove it. Removing a machine-wide (`HKLM`) entry prompts for Administrator permission (UAC); choosing to keep the existing entry installs the files without registering LibreWheel. For silent installs, pass `/REMOVELOGITECH` to opt into automatic backup and removal.
-* **Uninstall:** Uninstall from Windows Settings (*Installed apps*) after closing games; LibreWheel's per-user COM/DirectInput registration and startup entry are cleaned up automatically without touching user config or backups.
+* **Logitech/OEM Registry Conflict Detection:** If an existing Logitech or other third-party G29 `OEMForceFeedback` registry entry is detected (in `HKLM` or `HKCU`), the installer warns that LibreWheel force feedback will not work while it remains and offers to export a `.reg` backup (`%LOCALAPPDATA%\LibreWheel\backups\`) and remove it. Removing a machine-wide (`HKLM`) entry prompts for Administrator permission (UAC); choosing to keep the existing entry warns again and installs the files without registering LibreWheel. For silent installs, pass `--silent` (and `--remove-logitech` to opt into automatic backup and removal).
+* **Uninstall:** Uninstall from Windows Settings (*Installed apps*) or run `Uninstall.exe --uninstall` after closing games; LibreWheel's per-user COM/DirectInput registration, Start Menu shortcut, and startup entry are cleaned up automatically without touching user config or backups.
 
 ## Build and Test
 
-**Prerequisites:** Visual Studio 2022 (or Build Tools for Visual Studio 2022) with the *Desktop development with C++* workload, a Windows SDK, and CMake 3.24 or newer.
+**Prerequisites:** Visual Studio 2022 (or Build Tools for Visual Studio 2022) with the *Desktop development with C++* workload, a Windows SDK, and CMake 3.24 or newer. No external installer tool is required.
+
+LibreWheel provides only two build configurations:
+
+* **Release:** Full MSVC optimizations with cross-file IPO/LTCG (`/O2 /Ob3 /Oi /Ot /Gw /Gy`, `/LTCG /OPT:REF /OPT:ICF`, `/DEBUG:NONE`).
+* **Debug:** Zero optimizations (`/Od /Ob0 /RTC1`) with full `.pdb` debug symbols (`/Zi`, `/DEBUG:FULL`) shipped alongside Debug binaries.
 
 Run the following commands from the repository root:
 
 ```powershell
-# 64-bit build and tests (software-only default, no motor output)
+# 64-bit Release build and tests
 cmake --preset x64
-cmake --build --preset x64
-ctest --preset x64
+cmake --build --preset release-x64
+ctest --preset release-x64
 
-# 32-bit build and tests (software-only default, no motor output)
+# 32-bit Release build and tests
 cmake --preset x86
-cmake --build --preset x86
-ctest --preset x86
+cmake --build --preset release-x86
+ctest --preset release-x86
+
+# Unoptimized Debug builds with full symbols
+cmake --build --preset debug-x64
+ctest --preset debug-x64
+cmake --build --preset debug-x86
+ctest --preset debug-x86
 ```
 
-Additional presets enable the out-of-process hardware output owner (`LibreWheelOutput.exe`):
-
-* `bench-x64` / `bench-x86`: Torque-limited (~10%) hardware validation builds (opt-in at runtime via `LIBREWHEEL_BENCH_OUTPUT=1`).
-* `full-force-x64` / `full-force-x86`: Full-range motor output builds (enabled by default unless `LIBREWHEEL_BENCH_OUTPUT=0`).
-
-Each `build/<preset>/Release` directory produces `LibreWheelFF.dll`, `librewheel.exe`, `LibreWheelTray.exe`, and (for `bench-*` / `full-force-*` presets) `LibreWheelOutput.exe`. The DLL architecture must match the target game's process bitness.
+Each `build/<architecture>/<Configuration>` directory produces `LibreWheelFF.dll`, `LibreWheelOutput.exe`, `librewheel.exe`, and `LibreWheelTray.exe` (plus `.pdb` files in `Debug`). The DLL architecture must match the target game's process bitness. Set `LIBREWHEEL_DISABLE_OUTPUT=1` in the environment to run `LibreWheelFF.dll` in software-only mode without motor output.
 
 * **CLI (`librewheel.exe`):** Raw HID diagnostics (including live input polling rate), DirectInput probing, settings checks, steering range control, and pulse tests.
 * **Tray (`LibreWheelTray.exe`):** Automatically switches arriving PS3 compatibility-mode G29 wheels to native mode, applies configured `range_degrees` on connect, selects `.csv`/`.lut` curves, warns in the menu if invalid settings/LUTs trigger a linear fallback, respects Windows dark mode and Per-Monitor V2 DPI scaling, opens the config folder, manages Start with Windows, and stops active wheel output when exited.
-* **Installer (`tools/Build-Installer.ps1`):** Auto-detects Visual Studio CMake and Inno Setup 6, builds `full-force-x64` and `full-force-x86` (with optional MSVC PGO profiles), runs `ctest` on both architectures (pass `-SkipTests` to skip), and outputs `build/installer/LibreWheel-Setup.exe` plus `SHA256SUMS.txt`.
-* **Test suite (`ctest`):** Presets cover `x64`, `x86`, `bench-*`, and `full-force-*`, testing effect scheduling, waveforms and conditions, settings/LUT linear fallback, report encoding, COM DLL loading and lifecycle, FFB trace ring buffering, and both in-process and out-of-process broker IPC shutdown paths.
+* **Release Packaging (`tools/Build-Installer.ps1`):** Auto-detects Visual Studio CMake, builds both `x64` and `x86` (with optional MSVC PGO profiles for Release, or `-Configuration Debug` to bundle full `.pdb` symbols), runs `ctest` on both architectures (pass `-SkipTests` to skip), and outputs `LibreWheel-Setup.exe`, `LibreWheel-<version>-portable.zip`, and `SHA256SUMS.txt` in `build/installer/`.
+* **Test suite (`ctest`):** Presets cover `release-x64`, `release-x86`, `debug-x64`, and `debug-x86`, testing effect scheduling, waveforms and conditions, settings/LUT linear fallback, report encoding, COM DLL loading and lifecycle, FFB trace ring buffering, in-process and out-of-process broker IPC shutdown paths, and installer LZMS archive / PE validation / `.reg` export.
 
 ## Input and DirectInput Diagnostics
 
@@ -82,7 +88,7 @@ The registration script requires both the 64-bit and 32-bit DLLs and records the
 
 1. Reopen your DirectInput client or game.
 2. Run `directinput` and confirm it shows `LibreWheel=yes` for the G29 and reports the steering actuator.
-3. Run `pulse right` and `pulse left` to exercise the DirectInput API and verify effect status on the physical device. In the default (`x64`/`x86`) build this runs without motor output; physical torque requires a `bench-*` or `full-force-*` build (see [docs/architecture.md](docs/architecture.md)).
+3. Run `pulse right` and `pulse left` (default 5% torque; keep the wheel clear, or set `LIBREWHEEL_DISABLE_OUTPUT=1` for a software-only check) to exercise the DirectInput API and verify effect status on the physical device (see [docs/architecture.md](docs/architecture.md)).
 
 ### Switch Builds
 
