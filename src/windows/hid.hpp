@@ -38,6 +38,7 @@ struct Input {
 std::vector<DeviceInfo> discover();
 bool compatibility_connected();
 bool is_compatibility_interface(std::wstring_view path) noexcept;
+bool is_native_interface(std::wstring_view path) noexcept;
 std::optional<DeviceInfo> initialize_native(std::stop_token stop = {});
 GUID hid_interface_guid() noexcept;
 std::filesystem::path settings_path();

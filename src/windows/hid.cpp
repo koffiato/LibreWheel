@@ -124,6 +124,7 @@ std::filesystem::path settings_path() {
 namespace {
 
 constexpr std::wstring_view compatibility_interface = L"hid#vid_046d&pid_c294";
+constexpr std::wstring_view native_interface = L"hid#vid_046d&pid_c24f";
 
 bool matches_interface(std::wstring_view path, std::wstring_view id) noexcept {
     if (!path.starts_with(L"\\\\?\\") && !path.starts_with(L"\\??\\")) {
@@ -241,6 +242,10 @@ bool compatibility_connected() {
 
 bool is_compatibility_interface(std::wstring_view path) noexcept {
     return matches_interface(path, compatibility_interface);
+}
+
+bool is_native_interface(std::wstring_view path) noexcept {
+    return matches_interface(path, native_interface);
 }
 
 std::optional<DeviceInfo> initialize_native(std::stop_token stop) {

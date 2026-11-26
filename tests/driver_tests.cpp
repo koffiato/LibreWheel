@@ -20,6 +20,7 @@ void check(bool success, const char* description) {
 
 void compatibility_arrival() {
     using lw::win::is_compatibility_interface;
+    using lw::win::is_native_interface;
     check(is_compatibility_interface(LR"(\\?\HID#VID_046D&PID_C294#7&e23ac16&0&0000#{guid})"),
           "recognize an arriving G29 compatibility interface");
     check(is_compatibility_interface(LR"(\??\hid#vid_046d&pid_c294&mi_00#instance)"),
@@ -28,6 +29,10 @@ void compatibility_arrival() {
           "native re-enumeration does not request another mode switch");
     check(!is_compatibility_interface(LR"(\\?\hid#vid_046d&pid_c2940#instance)"),
           "a partial product ID is not a compatibility arrival");
+    check(is_native_interface(LR"(\\?\hid#vid_046d&pid_c24f&mi_00#instance)"),
+          "recognize an arriving G29 native interface");
+    check(!is_native_interface(LR"(\\?\hid#vid_046d&pid_c294&mi_00#instance)"),
+          "compatibility interface is not native");
 }
 
 void polarity() {

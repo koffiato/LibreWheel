@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "driver.hpp"
 #include "hid.hpp"
+#include "output_lease.hpp"
 #include "settings.hpp"
 
 #include <cfgmgr32.h>
 #include <algorithm>
+#include <chrono>
 #include <cwchar>
 #include <iomanip>
 #include <iostream>
@@ -66,6 +68,9 @@ int monitor() {
         throw std::runtime_error("Unable to register HID hotplug notification");
     }
     std::unique_ptr<HidInput> input;
+    auto rate_window = std::chrono::steady_clock::now();
+    unsigned reports_in_window = 0;
+    unsigned reports_per_second = 0;
     std::wcout << L"Monitoring the native G29 joystick collection. Ctrl+C exits.\n";
     SetEvent(arrival.get());
     while (true) {
@@ -86,6 +91,9 @@ int monitor() {
                 attached->begin();
                 describe(attached->info());
                 input = std::move(attached);
+                rate_window = std::chrono::steady_clock::now();
+                reports_in_window = 0;
+                reports_per_second = 0;
             } catch (const std::exception& error) {
                 std::cerr << error.what() << '\n';
             }
@@ -94,13 +102,21 @@ int monitor() {
                 const auto state = input->take();
                 input->begin();
                 if (state) {
+                    ++reports_in_window;
+                    const auto now_time = std::chrono::steady_clock::now();
+                    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now_time - rate_window);
+                    if (elapsed.count() >= 1000) {
+                        reports_per_second = static_cast<unsigned>(reports_in_window * 1000 / elapsed.count());
+                        reports_in_window = 0;
+                        rate_window = now_time;
+                    }
                     std::wcout << L"\rWheel " << std::setw(5) << state->steering
                                << L"  accelerator " << std::setw(3) << state->accelerator
                                << L"  brake " << std::setw(3) << state->brake
                                << L"  clutch " << std::setw(3) << state->clutch
                                << L"  hat " << std::setw(2) << state->hat
                                << L"  buttons 0x" << std::hex << std::setw(7) << state->buttons
-                               << std::dec << L"  " << std::flush;
+                               << std::dec << L"  rate " << std::setw(4) << reports_per_second << L" Hz  " << std::flush;
                 }
             } catch (const std::system_error& error) {
                 std::wcout << L"\n";
@@ -272,6 +288,35 @@ int pulse(bool right, unsigned percent) {
     return 0;
 }
 
+int set_range(unsigned degrees) {
+    const auto report = lw::g29::operating_range(degrees);
+    if (!report) {
+        throw std::runtime_error("Range must be an integer from 40 to 900 degrees");
+    }
+    const auto candidates = discover();
+    if (candidates.size() != 1 || !candidates.front().classic_output) {
+        throw std::runtime_error("Range requires one connected G29 in native mode with classic output");
+    }
+    const auto owner = handle(CreateMutexW(nullptr, FALSE, output_mutex_name));
+    if (!owner) {
+        throw std::runtime_error("Unable to coordinate G29 output access");
+    }
+    const auto ownership = WaitForSingleObject(owner.get(), 0);
+    if (ownership != WAIT_OBJECT_0 && ownership != WAIT_ABANDONED) {
+        throw std::runtime_error("Another application currently owns G29 force-feedback output");
+    }
+    struct Unlock {
+        HANDLE mutex;
+        ~Unlock() { ReleaseMutex(mutex); }
+    } unlock{owner.get()};
+    HidOutput output(candidates.front().path);
+    if (!output.send(*report)) {
+        throw std::runtime_error("G29 did not acknowledge the operating range report");
+    }
+    std::wcout << L"Set G29 steering range to " << degrees << L" degrees.\n";
+    return 0;
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -317,6 +362,14 @@ int wmain(int argc, wchar_t** argv) {
                 return 0;
             }
         }
+        if (argc == 3 && std::wstring_view(argv[1]) == L"range") {
+            const std::wstring_view value(argv[2]);
+            if (value.empty() || value.size() > 3 ||
+                !std::ranges::all_of(value, [](wchar_t ch) { return ch >= L'0' && ch <= L'9'; })) {
+                throw std::runtime_error("Range must be an integer from 40 to 900 degrees");
+            }
+            return set_range(static_cast<unsigned>(std::wcstol(argv[2], nullptr, 10)));
+        }
         if ((argc == 3 || argc == 4) && std::wstring_view(argv[1]) == L"pulse") {
             const std::wstring_view direction(argv[2]);
             if (direction == L"left" || direction == L"right") {
@@ -335,7 +388,7 @@ int wmain(int argc, wchar_t** argv) {
                 return pulse(direction == L"right", percent);
             }
         }
-        std::wcout << L"Usage: librewheel {list|native|monitor|directinput|settings|pulse <left|right> [percent]}\n";
+        std::wcout << L"Usage: librewheel {list|native|monitor|directinput|settings|range <40-900>|pulse <left|right> [percent]}\n";
         return argc == 1 ? 0 : 1;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

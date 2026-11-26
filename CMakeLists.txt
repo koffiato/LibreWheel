@@ -67,7 +67,7 @@ if(WIN32)
     endif()
     add_executable(librewheel src/windows/cli.cpp)
     target_link_libraries(librewheel PRIVATE wheel_hid dinput8 dxguid uuid cfgmgr32)
-    add_executable(LibreWheelTray WIN32 src/windows/tray.cpp src/windows/tray.rc)
+    add_executable(LibreWheelTray WIN32 src/windows/tray.cpp src/windows/tray.rc src/windows/tray.manifest)
     target_link_libraries(LibreWheelTray PRIVATE wheel_hid shell32 user32 advapi32)
 endif()
 
