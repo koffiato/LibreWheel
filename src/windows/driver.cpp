@@ -29,7 +29,6 @@ std::atomic_long server_locks = 0;
 constexpr DWORD nominal = DI_FFNOMINALMAX;
 constexpr auto sample_period = 4ms;
 constexpr auto maximum_motion_age = 50ms;
-constexpr auto lut_poll_interval = 250ms;
 
 Time now() noexcept { return trace_time(); }
 double level(LONG value) noexcept { return std::clamp(double(value) / nominal, -1.0, 1.0); }
@@ -247,10 +246,18 @@ public:
         if (!input_->info().classic_output) {
             throw std::runtime_error("The G29 vendor output field is missing");
         }
-        const auto config = settings_path();
-        std::error_code error;
-        const auto modified = std::filesystem::last_write_time(config, error);
-        settings_ = load_settings(config);
+        std::string settings_warning;
+        try {
+            auto loaded = load_settings_with_fallback(settings_path());
+            settings_ = std::move(loaded.settings);
+            settings_warning = std::move(loaded.fallback_reason);
+        } catch (const std::exception& error) {
+            settings_ = {};
+            settings_warning = error.what();
+        }
+        if (!settings_warning.empty()) {
+            OutputDebugStringA(("LibreWheel: " + settings_warning + "\n").c_str());
+        }
 #ifdef LIBREWHEEL_BENCH_OUTPUT
         wchar_t enable[2]{};
         const auto length = GetEnvironmentVariableW(L"LIBREWHEEL_BENCH_OUTPUT", enable, 2);
@@ -262,22 +269,17 @@ public:
         if (settings_.log_ffb) {
             try {
                 trace_ = std::make_unique<FfbTrace>(settings_);
+                if (!settings_warning.empty()) {
+                    trace_->commands.add({now(), "settings_fallback", S_FALSE});
+                }
             } catch (...) {
                 OutputDebugStringW(L"LibreWheel: unable to start the force-feedback trace\n");
             }
-        }
-        try {
-            lut_thread_ = std::jthread([this, config, modified](std::stop_token stop) {
-                watch_lut(stop, config, modified);
-            });
-        } catch (const std::system_error&) {
-            OutputDebugStringW(L"LibreWheel: unable to start the LUT watcher\n");
         }
         thread_ = std::thread([this] { run(); });
     }
 
     ~Session() {
-        lut_thread_.request_stop();
         {
             std::lock_guard lock(mutex_);
             closing_ = true;
@@ -285,9 +287,6 @@ public:
         wake_.notify_one();
         if (thread_.joinable()) {
             thread_.join();
-        }
-        if (lut_thread_.joinable()) {
-            lut_thread_.join();
         }
         if (trace_) {
             trace_->commands.add({now(), "session_end"});
@@ -314,29 +313,6 @@ public:
     }
 
 private:
-    void watch_lut(std::stop_token stop, const std::filesystem::path& config,
-                   std::filesystem::file_time_type modified) noexcept {
-        try {
-            std::condition_variable_any wake;
-            std::mutex wait_mutex;
-            std::unique_lock wait_lock(wait_mutex);
-            while (!stop.stop_requested()) {
-                std::optional<Lut> next;
-                if (reload_lut(config, modified, next)) {
-                    std::lock_guard lock(mutex_);
-                    if (closing_ || lost_) {
-                        return;
-                    }
-                    settings_.lut.swap(next);
-                    record({now(), "lut_reload", DI_OK, 0, 0, 0, settings_.lut.has_value()});
-                }
-                wake.wait_for(wait_lock, stop, lut_poll_interval, [] { return false; });
-            }
-        } catch (...) {
-            OutputDebugStringW(L"LibreWheel: LUT watcher stopped\n");
-        }
-    }
-
     void track(unsigned steering, Time time) noexcept {
         const double position = steering >= 32768 ? (double(steering) - 32768) / 32767
                                                   : (double(steering) - 32768) / 32768;
@@ -450,7 +426,6 @@ private:
 #ifdef LIBREWHEEL_BENCH_OUTPUT
     bool output_enabled_ = false;
 #endif
-    std::jthread lut_thread_;
     std::thread thread_;
 };
 

@@ -32,9 +32,13 @@ struct LutSelection {
     bool enabled = false;
 };
 
+struct SettingsResult {
+    Settings settings;
+    std::string fallback_reason;
+};
+
 Settings load_settings(const std::filesystem::path& path);
-bool reload_lut(const std::filesystem::path& path, std::filesystem::file_time_type& last_loaded,
-                std::optional<Lut>& lut);
+SettingsResult load_settings_with_fallback(const std::filesystem::path& path);
 LutSelection read_lut_selection(std::istream& ini);
 std::string write_lut_selection(std::string ini, const LutSelection& selection);
 double corrected_force(double mixed_force, const Settings& settings) noexcept;

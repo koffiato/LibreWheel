@@ -194,47 +194,53 @@ void lut_selection() {
           "older settings gain the LUT keys");
 }
 
-void live_lut() {
-    const std::filesystem::path fixture = "lut-reload-test";
+void settings_fallback() {
+    const std::filesystem::path fixture = "settings-fallback-test";
+    std::error_code cleanup_error;
+    std::filesystem::remove_all(fixture, cleanup_error);
     if (!std::filesystem::create_directory(fixture)) {
-        check(false, "create LUT reload fixture");
+        check(false, "create settings fallback fixture");
         return;
     }
     const auto ini = fixture / "settings.ini";
-    const auto first_curve = fixture / "first.csv";
-    const auto second_curve = fixture / "second.lut";
+    const auto valid_curve = fixture / "valid.csv";
+    const auto invalid_curve = fixture / "invalid.csv";
     struct Cleanup {
-        std::array<std::filesystem::path, 4> paths;
+        std::filesystem::path dir;
         ~Cleanup() {
-            for (const auto& path : paths) {
-                std::error_code error;
-                std::filesystem::remove(path, error);
-            }
+            std::error_code error;
+            std::filesystem::remove_all(dir, error);
         }
-    } cleanup{{ini, first_curve, second_curve, fixture}};
+    } cleanup{fixture};
 
-    const std::string initial = "gain_percent=50\nlut_enabled=false\nlut_file=first.csv\n";
-    std::ofstream(ini) << initial;
-    std::ofstream(first_curve) << "0,0\n.25,.5\n1,1\n";
-    std::ofstream(second_curve) << "0|0\n.25|.75\n1|1\n";
-    auto settings = load_settings(ini);
-    auto loaded = std::filesystem::last_write_time(ini);
-    auto modified = loaded;
-    const auto select = [&](LutSelection selection) {
-        std::ofstream(ini) << write_lut_selection("gain_percent=10\n", selection);
-        modified += 2s;
-        std::filesystem::last_write_time(ini, modified);
-        return reload_lut(ini, loaded, settings.lut);
-    };
-    check(!reload_lut(ini, loaded, settings.lut), "unchanged INI skips reload");
-    check(select({"first.csv", true}), "enable a curve in a running session");
-    equal(corrected_force(0.5, settings), 0.5, "reload applies the curve at the existing gain");
-    check(select({"second.lut", true}), "switch curves in a running session");
-    equal(corrected_force(0.5, settings), 0.75, "replacement curve applies");
-    check(!select({"missing.csv", true}), "reject a missing replacement curve");
-    equal(corrected_force(0.5, settings), 0.75, "failed reload keeps the previous curve");
-    check(select({"second.lut", false}), "disable the active curve in a running session");
-    equal(corrected_force(0.5, settings), 0.25, "disabling the curve restores linear output");
+    const auto missing = load_settings_with_fallback(ini);
+    check(missing.fallback_reason.empty() && !missing.settings.lut && missing.settings.gain == 1.0,
+          "missing settings.ini uses default linear settings without fallback warning");
+
+    std::ofstream(valid_curve) << "0,0\n.25,.5\n1,1\n";
+    std::ofstream(invalid_curve) << "0,.1\n1,1\n";
+
+    std::ofstream(ini) << "gain_percent=50\nrange_degrees=540\nlut_enabled=true\nlut_file=valid.csv\n";
+    const auto ok = load_settings_with_fallback(ini);
+    check(ok.fallback_reason.empty() && ok.settings.lut.has_value() && ok.settings.range == 540u,
+          "valid settings and LUT load cleanly");
+    equal(corrected_force(0.5, ok.settings), 0.5, "loaded LUT applies at configured gain");
+
+    std::ofstream(ini) << "gain_percent=50\nrange_degrees=540\nlut_enabled=true\nlut_file=missing.csv\n";
+    const auto missing_lut = load_settings_with_fallback(ini);
+    check(!missing_lut.fallback_reason.empty() && !missing_lut.settings.lut && missing_lut.settings.range == 540u,
+          "missing LUT falls back to linear while preserving valid settings");
+    equal(corrected_force(0.5, missing_lut.settings), 0.25, "linear fallback keeps configured gain");
+
+    std::ofstream(ini) << "gain_percent=50\nlut_enabled=true\nlut_file=invalid.csv\n";
+    const auto bad_lut = load_settings_with_fallback(ini);
+    check(!bad_lut.fallback_reason.empty() && !bad_lut.settings.lut, "invalid LUT falls back to linear");
+    equal(corrected_force(0.5, bad_lut.settings), 0.25, "invalid LUT fallback preserves linear gain");
+
+    std::ofstream(ini) << "not_a_valid_key=123\n";
+    const auto bad_ini = load_settings_with_fallback(ini);
+    check(!bad_ini.fallback_reason.empty() && !bad_ini.settings.lut && bad_ini.settings.gain == 1.0,
+          "corrupt settings.ini falls back to linear defaults");
 }
 
 void protocol() {
@@ -260,7 +266,7 @@ int main() {
     lifecycle();
     correction();
     lut_selection();
-    live_lut();
+    settings_fallback();
     protocol();
     return failures != 0;
 }

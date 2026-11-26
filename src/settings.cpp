@@ -179,6 +179,17 @@ void replace_setting(std::string& ini, std::string_view key, std::string_view va
     ini.append(key).append("=").append(value).append(newline);
 }
 
+Lut load_lut(const std::filesystem::path& settings_path, const LutSelection& selection) {
+    if (selection.file.empty()) {
+        throw std::runtime_error("lut_enabled requires lut_file");
+    }
+    std::ifstream csv(settings_path.parent_path() / selection.file);
+    if (!csv) {
+        throw std::runtime_error("Unable to open LUT file");
+    }
+    return Lut::read(csv);
+}
+
 } // namespace
 
 Settings load_settings(const std::filesystem::path& path) {
@@ -192,38 +203,36 @@ Settings load_settings(const std::filesystem::path& path) {
     auto [settings, selection] = parse_settings(file);
     file.close();
     if (selection.enabled) {
-        if (selection.file.empty()) {
-            throw std::runtime_error("lut_enabled requires lut_file");
-        }
-        std::ifstream csv(path.parent_path() / selection.file);
-        if (!csv) {
-            throw std::runtime_error("Unable to open LUT file");
-        }
-        settings.lut = Lut::read(csv);
+        settings.lut = load_lut(path, selection);
     }
     return settings;
 }
 
-bool reload_lut(const std::filesystem::path& path, std::filesystem::file_time_type& last_loaded,
-                std::optional<Lut>& lut) {
-    std::error_code error;
-    const auto modified = std::filesystem::last_write_time(path, error);
-    if (error || modified == last_loaded) {
-        return false;
-    }
-    try {
-        auto next = load_settings(path).lut;
-        const auto after_read = std::filesystem::last_write_time(path, error);
-        if (error || after_read != modified) {
-            return false;
+SettingsResult load_settings_with_fallback(const std::filesystem::path& path) {
+    std::ifstream file(path);
+    if (!file) {
+        std::error_code error;
+        if (!std::filesystem::exists(path, error) && !error) {
+            return {};
         }
-        lut = std::move(next);
-        last_loaded = modified;
-        return true;
-    } catch (const std::runtime_error&) {
-        // Leave the current curve active while a save is incomplete or invalid.
-        return false;
+        return {{}, "Unable to open settings.ini; using linear defaults"};
     }
+    ParsedSettings parsed;
+    try {
+        parsed = parse_settings(file);
+    } catch (const std::runtime_error& error) {
+        return {{}, std::string("Invalid settings.ini (") + error.what() + "); using linear defaults"};
+    }
+    file.close();
+    if (parsed.selection.enabled) {
+        try {
+            parsed.settings.lut = load_lut(path, parsed.selection);
+        } catch (const std::runtime_error& error) {
+            return {std::move(parsed.settings),
+                    std::string("LUT failed to load (") + error.what() + "); using linear fallback"};
+        }
+    }
+    return {std::move(parsed.settings), {}};
 }
 
 LutSelection read_lut_selection(std::istream& ini) {
