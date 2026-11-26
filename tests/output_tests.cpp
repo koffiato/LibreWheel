@@ -30,7 +30,7 @@ struct Sink {
     }
 };
 
-bool verify(End reason, OutputStrength strength) {
+bool verify(End reason) {
     const auto parent = handle(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     const auto changed = handle(CreateEventW(nullptr, FALSE, FALSE, nullptr));
     const auto stop = handle(CreateEventW(nullptr, TRUE, FALSE, nullptr));
@@ -45,7 +45,7 @@ bool verify(End reason, OutputStrength strength) {
     InterlockedExchange64(&mailbox.latest, frame(0x80));
     Sink sink{applied.get(), reason == End::send_error};
     BrokerExit result = BrokerExit::device_error;
-    std::thread worker([&] { result = drive_output(sink, signals, mailbox, 900, strength); });
+    std::thread worker([&] { result = drive_output(sink, signals, mailbox, 900); });
     const bool started = WaitForSingleObject(ready.get(), 1000) == WAIT_OBJECT_0;
     if (reason == End::idle_wait) {
         // An idle-neutral broker must stay alive past the watchdog timeout without exiting.
@@ -86,13 +86,11 @@ bool verify(End reason, OutputStrength strength) {
     else if (reason == End::stale) expected_exit = BrokerExit::watchdog_timeout;
     else if (reason == End::user_stop) expected_exit = BrokerExit::user_stop;
 
-    const std::uint8_t expected = strength == OutputStrength::full ? 0xff : 0x8c;
     const bool steady = reason == End::steady_force;
-    const std::uint8_t second = strength == OutputStrength::full ? 0x40 : 0x74;
     return started && wrote && result == expected_exit && sink.used == (steady ? 6u : 5u) &&
         sink.reports[0] == torque(0x80) && sink.reports[1] == disable_centering() &&
-        sink.reports[2] == operating_range(900) && sink.reports[3] == torque(expected) &&
-        (!steady || (second_force_written && sink.reports[4] == torque(second))) &&
+        sink.reports[2] == operating_range(900) && sink.reports[3] == torque(0xff) &&
+        (!steady || (second_force_written && sink.reports[4] == torque(0x40))) &&
         sink.reports[sink.used - 1] == torque(0x80);
 }
 
@@ -214,9 +212,7 @@ bool verify_ipc(const std::filesystem::path& broker_exe) {
 int wmain(int argc, wchar_t** argv) {
     for (auto end : {End::host_exit, End::stale, End::explicit_stop, End::user_stop,
                      End::send_error, End::steady_force, End::idle_wait}) {
-        // The steady-force fixture exercises both ends of the bench clamp.
-        const auto strength = end == End::steady_force ? OutputStrength::limited : OutputStrength::full;
-        if (!verify(end, strength)) {
+        if (!verify(end)) {
             std::cerr << "Output shutdown fixture failed: " << static_cast<int>(end) << '\n';
             return 1;
         }

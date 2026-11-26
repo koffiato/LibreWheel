@@ -5,7 +5,7 @@
 #include "ffb_trace.hpp"
 #include "hid.hpp"
 #include "settings.hpp"
-#ifdef LIBREWHEEL_BENCH_OUTPUT
+#ifndef LIBREWHEEL_TEST_DRIVER
 #include "output_lease.hpp"
 #endif
 
@@ -24,7 +24,7 @@ using namespace std::chrono_literals;
 
 std::atomic_long objects = 0;
 std::atomic_long server_locks = 0;
-#ifdef LIBREWHEEL_BENCH_OUTPUT
+#ifndef LIBREWHEEL_TEST_DRIVER
 std::atomic_bool output_suppressed = false;
 #endif
 
@@ -273,13 +273,13 @@ public:
         if (!settings_warning.empty()) {
             OutputDebugStringA(("LibreWheel: " + settings_warning + "\n").c_str());
         }
-#ifdef LIBREWHEEL_BENCH_OUTPUT
-        wchar_t enable[2]{};
-        const auto length = GetEnvironmentVariableW(L"LIBREWHEEL_BENCH_OUTPUT", enable, 2);
-#ifdef LIBREWHEEL_FULL_FORCE
-        output_enabled_ = length == 0;
-#endif
-        output_enabled_ |= length == 1 && enable[0] == L'1';
+#ifndef LIBREWHEEL_TEST_DRIVER
+        wchar_t flag[2]{};
+        const auto bench_len = GetEnvironmentVariableW(L"LIBREWHEEL_BENCH_OUTPUT", flag, 2);
+        const bool bench_disabled = bench_len == 1 && flag[0] == L'0';
+        const auto disable_len = GetEnvironmentVariableW(L"LIBREWHEEL_DISABLE_OUTPUT", flag, 2);
+        const bool explicit_disabled = disable_len == 1 && flag[0] == L'1';
+        output_enabled_ = !bench_disabled && !explicit_disabled;
 #endif
         if (settings_.log_ffb) {
             try {
@@ -296,7 +296,7 @@ public:
         if (!wake_event_ || !timer_) {
             throw std::runtime_error("Unable to create LibreWheel session timing primitives");
         }
-#ifdef LIBREWHEEL_BENCH_OUTPUT
+#ifndef LIBREWHEEL_TEST_DRIVER
         user_stop_ = handle(CreateEventW(nullptr, TRUE, FALSE, user_stop_event_name));
 #endif
         thread_ = std::thread([this] { run(); });
@@ -363,7 +363,7 @@ private:
     }
 
     void run() noexcept {
-#ifdef LIBREWHEEL_BENCH_OUTPUT
+#ifndef LIBREWHEEL_TEST_DRIVER
         std::unique_ptr<OutputLease> output;
         auto suppress_output = [&](const char* event_name, bool emergency_stop) {
             output_suppressed.store(true, std::memory_order_release);
@@ -413,7 +413,7 @@ private:
             Time next_tick{};
             bool was_active = false;
             input_->begin();
-#ifdef LIBREWHEEL_BENCH_OUTPUT
+#ifndef LIBREWHEEL_TEST_DRIVER
             if (output_enabled_) {
                 if (user_stop_ && WaitForSingleObject(user_stop_.get(), 0) == WAIT_OBJECT_0) {
                     suppress_output("output_stopped_by_user", false);
@@ -423,7 +423,7 @@ private:
             }
 #endif
             while (true) {
-#ifdef LIBREWHEEL_BENCH_OUTPUT
+#ifndef LIBREWHEEL_TEST_DRIVER
                 if (output_enabled_ && !output_suppressed.load(std::memory_order_acquire)) {
                     if (user_stop_ && WaitForSingleObject(user_stop_.get(), 0) == WAIT_OBJECT_0) {
                         suppress_output("output_stopped_by_user", false);
@@ -463,7 +463,7 @@ private:
                 if (trace_) {
                     trace_->mix.add({time, steering_raw, steering.has_value(), motion_, active, mixed, corrected, force});
                 }
-#ifdef LIBREWHEEL_BENCH_OUTPUT
+#ifndef LIBREWHEEL_TEST_DRIVER
                 if (output_enabled_ && !output_suppressed.load(std::memory_order_acquire)) {
                     if (!output && active && force != 0x80) {
                         launch_output();
@@ -487,7 +487,7 @@ private:
 
                 HANDLE wait_handles[4]{wake_event_.get()};
                 DWORD wait_count = 1;
-#ifdef LIBREWHEEL_BENCH_OUTPUT
+#ifndef LIBREWHEEL_TEST_DRIVER
                 if (output_enabled_ && !output_suppressed.load(std::memory_order_acquire)) {
                     if (user_stop_) {
                         wait_handles[wait_count++] = user_stop_.get();
@@ -534,7 +534,7 @@ private:
     std::mutex mutex_;
     Handle wake_event_;
     Handle timer_;
-#ifdef LIBREWHEEL_BENCH_OUTPUT
+#ifndef LIBREWHEEL_TEST_DRIVER
     Handle user_stop_;
 #endif
     Mixer mixer_;
@@ -545,7 +545,7 @@ private:
     std::unique_ptr<HidInput> input_;
     bool closing_ = false;
     bool lost_ = false;
-#ifdef LIBREWHEEL_BENCH_OUTPUT
+#ifndef LIBREWHEEL_TEST_DRIVER
     bool output_enabled_ = false;
 #endif
     std::thread thread_;

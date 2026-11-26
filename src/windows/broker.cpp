@@ -98,11 +98,6 @@ BrokerExit run(OutputSignals signals, OutputMailbox& mailbox, unsigned range, co
         HANDLE mutex;
         ~Unlock() { ReleaseMutex(mutex); }
     } unlock{owner.get()};
-#ifdef LIBREWHEEL_FULL_FORCE
-    constexpr auto strength = OutputStrength::full;
-#else
-    constexpr auto strength = OutputStrength::limited;
-#endif
 #ifdef LIBREWHEEL_TEST_BROKER
     TestOutput output(path);
     struct Output {
@@ -118,7 +113,7 @@ BrokerExit run(OutputSignals signals, OutputMailbox& mailbox, unsigned range, co
         bool send(const lw::g29::OutputReport& report) noexcept { return trace.send(device, report); }
     } traced_output{output, trace};
 #endif
-    return drive_output(traced_output, signals, mailbox, range, strength);
+    return drive_output(traced_output, signals, mailbox, range);
 }
 
 } // namespace

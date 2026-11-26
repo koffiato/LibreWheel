@@ -15,11 +15,8 @@ struct OutputSignals {
     HANDLE user_stop = nullptr;
 };
 
-enum class OutputStrength { limited, full };
-
 template<class Output>
-BrokerExit drive_output(Output& output, OutputSignals signals, OutputMailbox& mailbox, unsigned range,
-                        OutputStrength strength) {
+BrokerExit drive_output(Output& output, OutputSignals signals, OutputMailbox& mailbox, unsigned range) {
     constexpr std::uint8_t idle = 0x80;
     struct Neutral {
         Output& output;
@@ -89,15 +86,11 @@ BrokerExit drive_output(Output& output, OutputSignals signals, OutputMailbox& ma
         // A steady force may refresh the shared timestamp without signaling changed.
         const auto latest = static_cast<ULONGLONG>(InterlockedCompareExchange64(&mailbox.latest, 0, 0));
         latest_tick = latest >> 8;
-        const auto requested = static_cast<std::uint8_t>(latest & 0xff);
+        const auto force = static_cast<std::uint8_t>(latest & 0xff);
         const bool stale = GetTickCount64() - latest_tick >= lease_timeout_ms;
-        if (stale && (sent != idle || requested != idle)) {
+        if (stale && (sent != idle || force != idle)) {
             return BrokerExit::watchdog_timeout;
         }
-        // Limit bench builds to about 10% of the classic force-byte excursion.
-        const auto force = strength == OutputStrength::limited
-            ? std::clamp(requested, std::uint8_t{0x74}, std::uint8_t{0x8c})
-            : requested;
         if (force != sent) {
             if (!output.send(g29::torque(force))) {
                 return BrokerExit::device_error;
