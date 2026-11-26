@@ -1,6 +1,42 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 cmake_minimum_required(VERSION 3.24)
-project(LibreWheel VERSION 0.1.0 LANGUAGES CXX)
+
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" LIBREWHEEL_VERSION_RAW)
+string(STRIP "${LIBREWHEEL_VERSION_RAW}" LIBREWHEEL_VERSION_FULL)
+
+set(LIBREWHEEL_BUILD_METADATA "" CACHE STRING "Optional SemVer 2.0.0 build metadata appended to VERSION")
+if(LIBREWHEEL_BUILD_METADATA)
+    if(LIBREWHEEL_VERSION_FULL MATCHES "\\+")
+        set(LIBREWHEEL_VERSION_FULL "${LIBREWHEEL_VERSION_FULL}.${LIBREWHEEL_BUILD_METADATA}")
+    else()
+        set(LIBREWHEEL_VERSION_FULL "${LIBREWHEEL_VERSION_FULL}+${LIBREWHEEL_BUILD_METADATA}")
+    endif()
+endif()
+
+if(NOT LIBREWHEEL_VERSION_FULL MATCHES "^((0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*))(-([0-9A-Za-z.-]+))?(\\+([0-9A-Za-z.-]+))?$")
+    message(FATAL_ERROR "VERSION '${LIBREWHEEL_VERSION_FULL}' is not valid Semantic Versioning 2.0.0 (MAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]).")
+endif()
+set(LIBREWHEEL_VERSION_CORE "${CMAKE_MATCH_1}")
+set(LIBREWHEEL_VERSION_PRERELEASE "${CMAKE_MATCH_6}")
+set(LIBREWHEEL_VERSION_BUILD "${CMAKE_MATCH_8}")
+
+if(LIBREWHEEL_VERSION_PRERELEASE)
+    if(LIBREWHEEL_VERSION_PRERELEASE MATCHES "^\\.|\\.$|\\.\\." OR
+       LIBREWHEEL_VERSION_PRERELEASE MATCHES "(^|\\.)0[0-9]+(\\.|$)")
+        message(FATAL_ERROR "Invalid SemVer prerelease identifier in VERSION: '${LIBREWHEEL_VERSION_FULL}'")
+    endif()
+    set(LW_RC_PRERELEASE_FLAG "VS_FF_PRERELEASE")
+else()
+    set(LW_RC_PRERELEASE_FLAG "0")
+endif()
+if(LIBREWHEEL_VERSION_BUILD AND LIBREWHEEL_VERSION_BUILD MATCHES "^\\.|\\.$|\\.\\.")
+    message(FATAL_ERROR "Invalid SemVer build metadata in VERSION: '${LIBREWHEEL_VERSION_FULL}'")
+endif()
+
+project(LibreWheel VERSION ${LIBREWHEEL_VERSION_CORE} LANGUAGES CXX)
+
+configure_file(src/version.hpp.in "${CMAKE_CURRENT_BINARY_DIR}/generated/version.hpp" @ONLY)
 
 if(CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_CONFIGURATION_TYPES "Debug;Release" CACHE STRING "Supported build configurations" FORCE)
@@ -55,7 +91,7 @@ if(NOT LIBREWHEEL_PGO_MODE STREQUAL "OFF")
 endif()
 
 add_library(wheel_core STATIC src/effects.cpp src/settings.cpp src/protocol.cpp)
-target_include_directories(wheel_core PUBLIC src)
+target_include_directories(wheel_core PUBLIC src "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_compile_features(wheel_core PUBLIC cxx_std_20)
 
 if(WIN32)
@@ -116,7 +152,6 @@ if(WIN32)
             "${installer_rc}"
             src/windows/tray.manifest)
         target_include_directories(LibreWheel-Setup PRIVATE src/windows)
-        target_compile_definitions(LibreWheel-Setup PRIVATE "LIBREWHEEL_VERSION_STR=L\"${PROJECT_VERSION}\"")
         target_link_libraries(LibreWheel-Setup PRIVATE wheel_hid cabinet comctl32 dwmapi ole32 shell32 advapi32 user32 uuid)
         if(MSVC)
             target_compile_options(LibreWheel-Setup PRIVATE /guard:cf)

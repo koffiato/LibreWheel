@@ -2,6 +2,7 @@
 #include "effects.hpp"
 #include "protocol.hpp"
 #include "settings.hpp"
+#include "version.hpp"
 
 #include <cmath>
 #include <fstream>
@@ -285,6 +286,15 @@ void protocol() {
     check(!operating_range(39) && !operating_range(901), "range bounds");
 }
 
+void versioning() {
+    const std::string expected_core = std::to_string(lw::version::major) + "." +
+                                      std::to_string(lw::version::minor) + "." +
+                                      std::to_string(lw::version::patch);
+    check(lw::version::core == expected_core, "SemVer core matches major.minor.patch");
+    check(lw::version::full.starts_with(lw::version::core), "SemVer full starts with core version");
+    check(lw::version::wide.size() == lw::version::full.size(), "wide version string matches narrow length");
+}
+
 } // namespace
 
 int main() {
@@ -294,5 +304,6 @@ int main() {
     lut_selection();
     settings_fallback();
     protocol();
+    versioning();
     return failures != 0;
 }

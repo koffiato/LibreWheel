@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#pragma once
+
+#include <cstdint>
+#include <string_view>
+
+namespace lw::version {
+
+inline constexpr unsigned major = @PROJECT_VERSION_MAJOR@u;
+inline constexpr unsigned minor = @PROJECT_VERSION_MINOR@u;
+inline constexpr unsigned patch = @PROJECT_VERSION_PATCH@u;
+inline constexpr std::string_view core = "@LIBREWHEEL_VERSION_CORE@";
+inline constexpr std::string_view prerelease = "@LIBREWHEEL_VERSION_PRERELEASE@";
+inline constexpr std::string_view build_metadata = "@LIBREWHEEL_VERSION_BUILD@";
+inline constexpr std::string_view full = "@LIBREWHEEL_VERSION_FULL@";
+inline constexpr std::wstring_view wide = L"@LIBREWHEEL_VERSION_FULL@";
+inline constexpr bool is_prerelease = !prerelease.empty();
+inline constexpr std::uint32_t directinput_packed =
+    ((major & 0xffu) << 16) | ((minor & 0xffu) << 8) | (patch & 0xffu);
+
+} // namespace lw::version

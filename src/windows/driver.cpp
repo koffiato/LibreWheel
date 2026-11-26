@@ -5,6 +5,7 @@
 #include "ffb_trace.hpp"
 #include "hid.hpp"
 #include "settings.hpp"
+#include "version.hpp"
 #ifndef LIBREWHEEL_TEST_DRIVER
 #include "output_lease.hpp"
 #endif
@@ -641,7 +642,7 @@ public:
         }
         versions->dwFirmwareRevision = 0;
         versions->dwHardwareRevision = 0;
-        versions->dwFFDriverVersion = 0x00010000;
+        versions->dwFFDriverVersion = lw::version::directinput_packed ? lw::version::directinput_packed : 1u;
         return DI_OK;
     }
 

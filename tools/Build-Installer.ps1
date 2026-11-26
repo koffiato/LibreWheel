@@ -55,11 +55,15 @@ if (-not $SkipTests -and -not (Test-Path -LiteralPath $CTest)) {
 }
 
 $root = Split-Path -Parent $PSScriptRoot
-$cmakeText = Get-Content -LiteralPath (Join-Path $root 'CMakeLists.txt') -Raw
-if ($cmakeText -notmatch 'project\s*\(\s*LibreWheel\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)') {
-    throw 'Could not determine LibreWheel version from CMakeLists.txt.'
+$versionFile = Join-Path $root 'VERSION'
+if (-not (Test-Path -LiteralPath $versionFile)) {
+    throw 'Could not find VERSION file at repository root.'
 }
-$version = $Matches[1]
+$version = (Get-Content -LiteralPath $versionFile -Raw).Trim()
+$semverPattern = '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$'
+if ($version -notmatch $semverPattern) {
+    throw "VERSION '$version' is not valid Semantic Versioning 2.0.0."
+}
 $isDebug = $Configuration -eq 'Debug'
 if ($isDebug -and ($PgoProfileX64 -or $PgoProfileX86)) {
     throw 'PGO profiles apply only to Release builds.'
@@ -139,12 +143,12 @@ try {
     New-Item -ItemType Directory -Force -Path $outPath | Out-Null
 
     $suffix = if ($isDebug) { '-Debug' } else { '' }
-    $installerDest = Join-Path $outPath "LibreWheel-Setup$suffix.exe"
+    $installerDest = Join-Path $outPath "LibreWheel-$version$suffix-Setup.exe"
     Copy-Item -LiteralPath (Join-Path $bin64 'LibreWheel-Setup.exe') -Destination $installerDest -Force
     $artifacts = [Collections.Generic.List[IO.FileInfo]]::new()
     $artifacts.Add((Get-Item -LiteralPath $installerDest))
     if ($isDebug) {
-        $setupPdbDest = Join-Path $outPath "LibreWheel-Setup$suffix.pdb"
+        $setupPdbDest = Join-Path $outPath "LibreWheel-$version$suffix-Setup.pdb"
         Copy-Item -LiteralPath (Join-Path $bin64 'LibreWheel-Setup.pdb') -Destination $setupPdbDest -Force
         $artifacts.Add((Get-Item -LiteralPath $setupPdbDest))
     }

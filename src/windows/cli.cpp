@@ -3,6 +3,7 @@
 #include "hid.hpp"
 #include "output_lease.hpp"
 #include "settings.hpp"
+#include "version.hpp"
 
 #include <cfgmgr32.h>
 #include <algorithm>
@@ -349,6 +350,10 @@ int wmain(int argc, wchar_t** argv) {
             if (command == L"directinput") {
                 return directinput();
             }
+            if (command == L"version" || command == L"--version" || command == L"-v") {
+                std::wcout << L"LibreWheel " << lw::version::wide << L"\n";
+                return 0;
+            }
             if (command == L"settings") {
                 const auto path = settings_path();
                 const auto settings = lw::load_settings(path);
@@ -388,7 +393,7 @@ int wmain(int argc, wchar_t** argv) {
                 return pulse(direction == L"right", percent);
             }
         }
-        std::wcout << L"Usage: librewheel {list|native|monitor|directinput|settings|range <40-900>|pulse <left|right> [percent]}\n";
+        std::wcout << L"Usage: librewheel {list|native|monitor|directinput|settings|range <40-900>|pulse <left|right> [percent]|version}\n";
         return argc == 1 ? 0 : 1;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

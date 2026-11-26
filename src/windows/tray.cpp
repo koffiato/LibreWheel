@@ -3,6 +3,7 @@
 #include "output_lease.hpp"
 #include "settings.hpp"
 #include "tray_resource.h"
+#include "version.hpp"
 
 #include <dbt.h>
 #include <shellapi.h>
@@ -440,7 +441,8 @@ void add_icon(HWND window) {
     icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
     icon.uCallbackMessage = tray_callback;
     icon.hIcon = reinterpret_cast<HICON>(GetClassLongPtrW(window, GCLP_HICONSM));
-    wcscpy_s(icon.szTip, L"LibreWheel");
+    const std::wstring tip = L"LibreWheel " + std::wstring(lw::version::wide);
+    wcsncpy_s(icon.szTip, tip.c_str(), _TRUNCATE);
     if (Shell_NotifyIconW(NIM_ADD, &icon)) {
         icon.uVersion = NOTIFYICON_VERSION_4;
         Shell_NotifyIconW(NIM_SETVERSION, &icon);
@@ -488,6 +490,8 @@ void open_menu(HWND window, POINT anchor) {
     }
     const bool startup_enabled = starts_with_windows();
     const auto fallback_warning = settings_fallback_warning();
+    const std::wstring version_header = L"LibreWheel " + std::wstring(lw::version::wide);
+    AppendMenuW(menu, MF_GRAYED, 0, version_header.c_str());
     AppendMenuW(menu, MF_GRAYED, 0, detected_wheel());
     if (!fallback_warning.empty()) {
         AppendMenuW(menu, MF_GRAYED, 0, fallback_warning.c_str());

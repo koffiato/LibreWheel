@@ -1,11 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <winver.h>
 
+#ifdef _DEBUG
+#define LW_RC_DEBUG_FLAG VS_FF_DEBUG
+#else
+#define LW_RC_DEBUG_FLAG 0
+#endif
+
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
 PRODUCTVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
 FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
-FILEFLAGS 0
+FILEFLAGS (LW_RC_DEBUG_FLAG | @LW_RC_PRERELEASE_FLAG@)
 FILEOS VOS_NT_WINDOWS32
 FILETYPE @LW_RC_FILETYPE@
 FILESUBTYPE VFT2_UNKNOWN
@@ -16,12 +22,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "LibreWheel Contributors"
             VALUE "FileDescription", "@LW_RC_DESCRIPTION@"
-            VALUE "FileVersion", "@PROJECT_VERSION@.0"
+            VALUE "FileVersion", "@LIBREWHEEL_VERSION_FULL@"
             VALUE "InternalName", "@LW_RC_FILENAME@"
             VALUE "LegalCopyright", "GPL-3.0-or-later"
             VALUE "OriginalFilename", "@LW_RC_FILENAME@"
             VALUE "ProductName", "LibreWheel"
-            VALUE "ProductVersion", "@PROJECT_VERSION@"
+            VALUE "ProductVersion", "@LIBREWHEEL_VERSION_FULL@"
         END
     END
     BLOCK "VarFileInfo"

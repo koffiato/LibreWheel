@@ -6,7 +6,7 @@ LibreWheel is an experimental Windows driver for the Logitech G29. It uses the n
 
 ## Installer (Recommended)
 
-Run `LibreWheel-Setup.exe` (a native C++20 GPL-3.0-or-later self-extracting installer) to install the 64-bit and 32-bit drivers, `LibreWheelTray.exe`, and `librewheel.exe` per-user into `%LOCALAPPDATA%\Programs\LibreWheel` (default config and LUT files are copied to `%LOCALAPPDATA%\LibreWheel` if absent). A matching `LibreWheel-<version>-portable.zip` archive is also produced for manual setup via `Register-LibreWheel.ps1`.
+Run `LibreWheel-<version>-Setup.exe` (a native C++20 GPL-3.0-or-later self-extracting installer) to install the 64-bit and 32-bit drivers, `LibreWheelTray.exe`, and `librewheel.exe` per-user into `%LOCALAPPDATA%\Programs\LibreWheel` (default config and LUT files are copied to `%LOCALAPPDATA%\LibreWheel` if absent). A matching `LibreWheel-<version>-portable.zip` archive is also produced for manual setup via `Register-LibreWheel.ps1`.
 
 * **Logitech/OEM Registry Conflict Detection:** If an existing Logitech or other third-party G29 `OEMForceFeedback` registry entry is detected (in `HKLM` or `HKCU`), the installer warns that LibreWheel force feedback will not work while it remains and offers to export a `.reg` backup (`%LOCALAPPDATA%\LibreWheel\backups\`) and remove it. Removing a machine-wide (`HKLM`) entry prompts for Administrator permission (UAC); choosing to keep the existing entry warns again and installs the files without registering LibreWheel. For silent installs, pass `--silent` (and `--remove-logitech` to opt into automatic backup and removal).
 * **Uninstall:** Uninstall from Windows Settings (*Installed apps*) or run `Uninstall.exe --uninstall` after closing games; LibreWheel's per-user COM/DirectInput registration, Start Menu shortcut, and startup entry are cleaned up automatically without touching user config or backups.
@@ -44,7 +44,7 @@ Each `build/<architecture>/<Configuration>` directory produces `LibreWheelFF.dll
 
 * **CLI (`librewheel.exe`):** Raw HID diagnostics (including live input polling rate), DirectInput probing, settings checks, steering range control, and pulse tests.
 * **Tray (`LibreWheelTray.exe`):** Automatically switches arriving PS3 compatibility-mode G29 wheels to native mode, applies configured `range_degrees` on connect, selects `.csv`/`.lut` curves, warns in the menu if invalid settings/LUTs trigger a linear fallback, respects Windows dark mode and Per-Monitor V2 DPI scaling, opens the config folder, manages Start with Windows, and stops active wheel output when exited.
-* **Release Packaging (`tools/Build-Installer.ps1`):** Auto-detects Visual Studio CMake, builds both `x64` and `x86` (with optional MSVC PGO profiles for Release, or `-Configuration Debug` to bundle full `.pdb` symbols), runs `ctest` on both architectures (pass `-SkipTests` to skip), and outputs `LibreWheel-Setup.exe`, `LibreWheel-<version>-portable.zip`, and `SHA256SUMS.txt` in `build/installer/`.
+* **Release Packaging (`tools/Build-Installer.ps1`):** Auto-detects Visual Studio CMake, reads the SemVer 2.0.0 version from [VERSION](VERSION), builds both `x64` and `x86` (with optional MSVC PGO profiles for Release, or `-Configuration Debug` to bundle full `.pdb` symbols), runs `ctest` on both architectures (pass `-SkipTests` to skip), and outputs `LibreWheel-<version>-Setup.exe`, `LibreWheel-<version>-portable.zip`, and `SHA256SUMS.txt` in `build/installer/`. Use `tools/Set-Version.ps1` (`-Bump major|minor|patch` or `-Version X.Y.Z[-prerelease]`) to bump versions cleanly; see [CHANGELOG.md](CHANGELOG.md).
 * **Test suite (`ctest`):** Presets cover `release-x64`, `release-x86`, `debug-x64`, and `debug-x86`, testing effect scheduling, waveforms and conditions, settings/LUT linear fallback, report encoding, COM DLL loading and lifecycle, FFB trace ring buffering, in-process and out-of-process broker IPC shutdown paths, and installer LZMS archive / PE validation / `.reg` export.
 
 ## Input and DirectInput Diagnostics
@@ -68,6 +68,7 @@ Connect the wheel with its physical mode switch set to PS3. The G29 can start wi
 | `settings` | Prints the active `settings.ini` path and verifies that it (and any enabled LUT) parses cleanly. |
 | `range <40-900>` | Sends a hardware steering operating range (40°–900°) to a connected native G29 when no game holds FFB output. |
 | `pulse <left\|right> [percent]` | Runs a 1-second DirectInput constant-force pulse (1–100%, default 5%) and checks effect start and expiration status. |
+| `version` | Prints the LibreWheel Semantic Version (`--version` and `-v` are also accepted). |
 
 ## Register and Remove
 

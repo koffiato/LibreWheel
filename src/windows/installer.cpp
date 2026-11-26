@@ -4,6 +4,7 @@
 #include "output_lease.hpp"
 #include "payload_archive.hpp"
 #include "registration.hpp"
+#include "version.hpp"
 
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -27,18 +28,15 @@
 #include <string_view>
 #include <vector>
 
-#ifndef LIBREWHEEL_VERSION_STR
-#define LIBREWHEEL_VERSION_STR L"0.1.0"
-#endif
-
 namespace {
 
 constexpr wchar_t app_title[] = L"LibreWheel Setup";
-constexpr wchar_t version_text[] = LIBREWHEEL_VERSION_STR;
 constexpr wchar_t tray_window_class[] = L"LibreWheel.Tray.Window";
 constexpr wchar_t run_key[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t run_value[] = L"LibreWheelTray";
 constexpr wchar_t uninstall_key[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\LibreWheel";
+
+std::wstring version_string() { return std::wstring(lw::version::wide); }
 
 constexpr int btn_install = 1001;
 constexpr int btn_remove_oem = 1002;
@@ -310,7 +308,7 @@ void write_uninstall_entry(const std::filesystem::path& install_dir, std::size_t
     const auto uninstaller = install_dir / L"Uninstall.exe";
     const auto tray = install_dir / L"LibreWheelTray.exe";
     set_sz(L"DisplayName", L"LibreWheel");
-    set_sz(L"DisplayVersion", version_text);
+    set_sz(L"DisplayVersion", version_string());
     set_sz(L"Publisher", L"LibreWheel Contributors");
     set_sz(L"URLInfoAbout", L"https://github.com/koffiato/LibreWheel");
     set_sz(L"DisplayIcon", tray.wstring());
@@ -451,7 +449,7 @@ int run_install(bool silent, bool silent_remove_logitech, bool silent_launch) {
     const bool upgrading = std::filesystem::exists(install_dir / L"LibreWheelTray.exe");
 
     if (!silent) {
-        const std::wstring heading = std::wstring(upgrading ? L"Update LibreWheel " : L"Install LibreWheel ") + version_text;
+        const std::wstring heading = std::wstring(upgrading ? L"Update LibreWheel " : L"Install LibreWheel ") + version_string();
         const std::wstring body =
             L"LibreWheel provides native DirectInput force feedback for the Logitech G29 (PS3 native mode) "
             L"without Logitech G HUB or kernel drivers.\n\n"
@@ -579,7 +577,7 @@ int run_install(bool silent, bool silent_remove_logitech, bool silent_launch) {
             L"LibreWheel force feedback will NOT work until that entry is removed and LibreWheel Setup "
             L"(or Register-LibreWheel.ps1) is run again.";
     } else {
-        summary = L"LibreWheel " + std::wstring(version_text) + L" was installed and registered for 64-bit and 32-bit DirectInput games.";
+        summary = L"LibreWheel " + version_string() + L" was installed and registered for 64-bit and 32-bit DirectInput games.";
         if (remove_conflicts) {
             summary += L"\n\nRemoved conflicting Logitech/OEM registration (backup saved in " + backup_dir.wstring() + L").";
         }
