@@ -18,13 +18,23 @@ double shaped_level(double level, const Effect& effect, Time elapsed) noexcept {
         return level;
     }
     const auto& envelope = *effect.envelope;
-    if (elapsed < envelope.attack) {
-        return std::lerp(envelope.attack_level, level, fraction(elapsed, envelope.attack));
+    auto attack = envelope.attack;
+    auto fade = envelope.fade;
+    if (effect.duration != forever && attack > Time::zero() && fade > Time::zero() &&
+        attack > effect.duration - fade) {
+        const double total = double(attack.count()) + double(fade.count());
+        const auto scaled_attack = static_cast<Time::rep>(
+            std::llround(double(effect.duration.count()) * (double(attack.count()) / total)));
+        attack = Time(std::clamp<Time::rep>(scaled_attack, 0, effect.duration.count()));
+        fade = effect.duration - attack;
     }
-    if (effect.duration != forever && envelope.fade > Time::zero()) {
+    if (elapsed < attack) {
+        return std::lerp(envelope.attack_level, level, fraction(elapsed, attack));
+    }
+    if (effect.duration != forever && fade > Time::zero()) {
         const auto remaining = effect.duration - elapsed;
-        if (remaining < envelope.fade) {
-            return std::lerp(envelope.fade_level, level, fraction(remaining, envelope.fade));
+        if (remaining < fade) {
+            return std::lerp(envelope.fade_level, level, fraction(remaining, fade));
         }
     }
     return level;
@@ -64,8 +74,9 @@ double condition_force(const Condition& condition, const Motion& motion) noexcep
         return 0;
     }
     const double coefficient = delta > 0 ? condition.positive_coefficient : condition.negative_coefficient;
+    const double limit = delta > 0 ? condition.positive_limit : condition.negative_limit;
     const double displacement = std::copysign(std::abs(delta) - condition.deadband, delta);
-    return std::clamp(-coefficient * displacement, -condition.negative_limit, condition.positive_limit);
+    return std::clamp(-coefficient * displacement, -limit, limit);
 }
 
 } // namespace

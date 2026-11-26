@@ -45,6 +45,14 @@ void effects() {
     equal(evaluate(effect, 90ms, {}), 0.3, "fade interpolation");
     equal(evaluate(effect, 100ms, {}), 0, "finite duration boundary");
 
+    // Overlapping attack and fade scale proportionally to meet continuously at the sustain level.
+    effect.envelope = Envelope{0.2, 0.4, 60ms, 60ms};
+    equal(evaluate(effect, 0ms, {}), 0.1, "overlapping envelope attack start");
+    equal(evaluate(effect, 25ms, {}), 0.25, "overlapping envelope attack midpoint");
+    equal(evaluate(effect, 50ms, {}), 0.4, "overlapping envelope meets continuously at sustain");
+    equal(evaluate(effect, 75ms, {}), 0.3, "overlapping envelope fade midpoint");
+    equal(evaluate(effect, 99ms, {}), 0.204, "overlapping envelope approaches fade level");
+
     effect = {};
     effect.parameters = Ramp{-1, 1};
     effect.duration = 40ms;
@@ -67,11 +75,15 @@ void effects() {
     equal(evaluate(effect, 0ms, {}), 1, "offset periodic saturation");
 
     const Motion motion{0.65, -0.5, 0.2, true, true};
+    const Motion negative_motion{-0.65, -0.5, 0.2, true, true};
     const Motion stationary{0.65, -0.5, 0.2, true, false};
-    effect.parameters = Condition{ConditionKind::spring, 0.1, 0.05, 1, 0.5, 0.8, 0.3};
-    equal(evaluate(effect, 0ms, motion), -0.3, "spring uses position, offset and negative limit");
+    effect.parameters = Condition{ConditionKind::spring, 0.1, 0.05, 1, 0.5, 0.3, 0.2};
+    equal(evaluate(effect, 0ms, motion), -0.3, "positive-side spring clamps to positive saturation");
+    equal(evaluate(effect, 0ms, negative_motion), 0.2, "negative-side spring clamps to negative saturation");
     equal(evaluate(effect, 0ms, stationary), -0.3, "stationary spring retains the last steering position");
     auto& condition = std::get<Condition>(effect.parameters);
+    condition.positive_limit = 0.8;
+    condition.negative_limit = 0.8;
     condition.kind = ConditionKind::damper;
     equal(evaluate(effect, 0ms, motion), 0.275, "damper uses velocity");
     equal(evaluate(effect, 0ms, stationary), 0, "damper suppresses stale velocity");
