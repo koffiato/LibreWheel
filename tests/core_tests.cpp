@@ -146,8 +146,34 @@ void lifecycle() {
     }
     check(mixer.add(effect) == 0, "fixed maximum effect count");
     check(mixer.start(last, 549ms, 1) && mixer.sample(549ms, {}).active, "last slot can play");
+    check(!mixer.needs_motion() && !mixer.sample(549ms, {}).uses_motion,
+          "constant force alone does not require HID steering input");
     mixer.stop_all();
     check(!mixer.sample(550ms, {}).active, "stop all clears the last slot");
+
+    mixer.reset();
+    mixer.set_gain(1.0);
+    Effect spring;
+    spring.duration = 20ms;
+    spring.parameters = Condition{ConditionKind::spring, 0, 0, 1, 1, 1, 1};
+    const auto spring_id = mixer.add(spring);
+    check(!mixer.needs_motion(), "stopped spring does not require motion");
+    check(mixer.start(spring_id, 600ms, 1) && mixer.needs_motion(), "started spring requires motion");
+    const auto active_spring = mixer.sample(605ms, Motion{0.5, 0, 0, true, false});
+    check(active_spring.active && active_spring.uses_motion, "active spring reports uses_motion");
+    equal(active_spring.force, -0.5, "active spring evaluates position");
+    mixer.pause(606ms);
+    check(!mixer.needs_motion() && !mixer.sample(610ms, Motion{0.5, 0, 0, true, false}).uses_motion,
+          "paused spring does not require motion");
+    mixer.resume(610ms);
+    mixer.set_enabled(false);
+    check(!mixer.needs_motion() && !mixer.sample(612ms, Motion{0.5, 0, 0, true, false}).uses_motion,
+          "disabled actuators do not require motion");
+    mixer.set_enabled(true);
+    check(mixer.needs_motion(), "re-enabled spring requires motion again");
+    const auto expired_spring = mixer.sample(630ms, Motion{0.5, 0, 0, true, false});
+    check(!expired_spring.active && !expired_spring.uses_motion && !mixer.needs_motion(),
+          "expired spring clears motion requirement");
 }
 
 void correction() {

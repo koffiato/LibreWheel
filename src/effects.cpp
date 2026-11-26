@@ -227,6 +227,18 @@ bool Mixer::active(Time now) const noexcept {
     return false;
 }
 
+bool Mixer::needs_motion() const noexcept {
+    if (!enabled_ || paused()) {
+        return false;
+    }
+    for (auto slots = started_slots_; slots; slots &= slots - 1) {
+        if (std::holds_alternative<Condition>(slots_[std::countr_zero(slots)].effect.parameters)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 unsigned Mixer::size() const noexcept {
     return static_cast<unsigned>(std::ranges::count_if(slots_, [](const Slot& slot) { return slot.id != 0; }));
 }
@@ -267,6 +279,7 @@ void Mixer::set_gain(double gain) noexcept { gain_ = std::clamp(gain, 0.0, 1.0);
 Mixer::Sample Mixer::sample(Time now, const Motion& motion) noexcept {
     double mixed = 0;
     bool active = false;
+    bool uses_motion = false;
     const bool output = enabled_ && !paused();
     const auto time = clock_at(now);
     // Visit only started slots, in slot order so the sum is unchanged.
@@ -277,6 +290,9 @@ Mixer::Sample Mixer::sample(Time now, const Motion& motion) noexcept {
             continue;
         }
         active = output;
+        if (output && std::holds_alternative<Condition>(slot.effect.parameters)) {
+            uses_motion = true;
+        }
         const auto elapsed = time - slot.started - slot.effect.delay;
         if (elapsed >= Time::zero() && output) {
             const auto duration = slot.effect.duration;
@@ -284,7 +300,7 @@ Mixer::Sample Mixer::sample(Time now, const Motion& motion) noexcept {
             mixed += evaluate(slot.effect, phase, motion);
         }
     }
-    return {mixed * gain_, active};
+    return {mixed * gain_, active, uses_motion};
 }
 
 } // namespace lw

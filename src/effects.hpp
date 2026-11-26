@@ -51,6 +51,7 @@ public:
     struct Sample {
         double force;
         bool active;
+        bool uses_motion;
     };
 
     Id add(const Effect& effect) noexcept;
@@ -60,6 +61,7 @@ public:
     bool stop(Id id) noexcept;
     std::optional<bool> playing(Id id, Time now) const noexcept;
     bool active(Time now) const noexcept;
+    bool needs_motion() const noexcept;
     unsigned size() const noexcept;
     void stop_all() noexcept;
     void reset() noexcept;

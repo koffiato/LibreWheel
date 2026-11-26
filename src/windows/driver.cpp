@@ -318,7 +318,7 @@ public:
         }
     }
 
-    template<class Call> HRESULT access(Call&& call) {
+    template<class Call> HRESULT access(Call&& call, bool wake = true) {
         HRESULT result = DI_OK;
         {
             std::lock_guard lock(mutex_);
@@ -326,8 +326,11 @@ public:
                 return DIERR_INPUTLOST;
             }
             result = call(mixer_, now());
+            if (wake) {
+                needs_motion_.store(mixer_.needs_motion(), std::memory_order_release);
+            }
         }
-        if (wake_event_) {
+        if (wake && wake_event_) {
             SetEvent(wake_event_.get());
         }
         return result;
@@ -412,6 +415,7 @@ private:
             int steering_raw = -1;
             Time next_tick{};
             bool was_active = false;
+            bool was_reading_input = false;
             input_->begin();
 #ifndef LIBREWHEEL_TEST_DRIVER
             if (output_enabled_) {
@@ -433,16 +437,29 @@ private:
                 }
 #endif
                 const auto time = now();
-                const auto steering = input_->drain_steering();
-                if (steering) {
-                    track(*steering, time);
-                    steering_raw = static_cast<int>(*steering);
-                }
-                if (time - input_time_ > maximum_motion_age) {
-                    // A stationary G29 can stop sending reports. Its last position
-                    // still applies while the outstanding read watches for changes.
+                const bool read_input = needs_motion_.load(std::memory_order_acquire) || trace_ != nullptr;
+                bool drained = false;
+                std::optional<unsigned> steering;
+                if (read_input) {
+                    if (!was_reading_input) {
+                        input_time_ = {};
+                        motion_.derivatives_valid = false;
+                    }
+                    steering = input_->drain_steering();
+                    drained = true;
+                    if (steering) {
+                        track(*steering, time);
+                        steering_raw = static_cast<int>(*steering);
+                    }
+                    if (time - input_time_ > maximum_motion_age) {
+                        // A stationary G29 can stop sending reports. Its last position
+                        // still applies while the outstanding read watches for changes.
+                        motion_.derivatives_valid = false;
+                    }
+                } else if (was_reading_input) {
                     motion_.derivatives_valid = false;
                 }
+                was_reading_input = read_input;
 
                 Mixer::Sample sampled{};
                 bool closing = false;
@@ -451,13 +468,18 @@ private:
                     closing = closing_;
                     if (!closing) {
                         sampled = mixer_.sample(time, motion_);
+                        needs_motion_.store(sampled.uses_motion, std::memory_order_release);
                     }
                 }
                 if (closing) {
                     break;
                 }
+                if (sampled.uses_motion && !drained) {
+                    // A condition effect started after our pre-lock check; drain fresh steering first.
+                    continue;
+                }
 
-                const auto [mixed, active] = sampled;
+                const auto [mixed, active, uses_motion] = sampled;
                 const auto corrected = corrected_force(mixed, settings_);
                 const auto force = g29::force_byte(corrected);
                 if (trace_) {
@@ -485,7 +507,7 @@ private:
                 }
                 previous = force;
 
-                HANDLE wait_handles[4]{wake_event_.get()};
+                HANDLE wait_handles[5]{wake_event_.get()};
                 DWORD wait_count = 1;
 #ifndef LIBREWHEEL_TEST_DRIVER
                 if (output_enabled_ && !output_suppressed.load(std::memory_order_acquire)) {
@@ -497,16 +519,12 @@ private:
                     }
                 }
 #endif
+                if (uses_motion) {
+                    wait_handles[wait_count++] = input_->ready();
+                }
                 if (active) {
                     const auto current = now();
-                    if (!was_active || next_tick <= current) {
-                        next_tick = current + sample_period;
-                    } else {
-                        next_tick += sample_period;
-                        if (next_tick <= current) {
-                            next_tick = current + sample_period;
-                        }
-                    }
+                    next_tick = next_sample_deadline(current, next_tick, sample_period, was_active);
                     was_active = true;
                     const auto delay_us = std::max<Time::rep>(1, (next_tick - current).count());
                     LARGE_INTEGER due{};
@@ -545,6 +563,7 @@ private:
     std::unique_ptr<HidInput> input_;
     bool closing_ = false;
     bool lost_ = false;
+    std::atomic_bool needs_motion_{false};
 #ifndef LIBREWHEEL_TEST_DRIVER
     bool output_enabled_ = false;
 #endif
@@ -598,7 +617,7 @@ public:
         }
         try {
             if (session_) {
-                const auto state = session_->access([](Mixer&, Time) { return DI_OK; });
+                const auto state = session_->access([](Mixer&, Time) { return DI_OK; }, false);
                 if (SUCCEEDED(state)) {
                     return DI_OK;
                 }
@@ -665,7 +684,7 @@ public:
             if (!mixer.active(time)) state->dwState |= DIGFFS_STOPPED;
             if (mixer.paused()) state->dwState |= DIGFFS_PAUSED;
             return DI_OK;
-        });
+        }, false);
     }
 
     HRESULT STDMETHODCALLTYPE DownloadEffect(DWORD id, DWORD type, DWORD* handle,
@@ -737,18 +756,18 @@ public:
             }
             *status = *playing ? DIEGES_PLAYING : 0;
             return DI_OK;
-        });
+        }, false);
     }
 
 private:
-    template<class Call> HRESULT with(DWORD id, Call&& call) {
+    template<class Call> HRESULT with(DWORD id, Call&& call, bool wake = true) {
         std::lock_guard lock(mutex_);
-        return session_ && id == id_ ? session_->access(call) : DIERR_NOTEXCLUSIVEACQUIRED;
+        return session_ && id == id_ ? session_->access(call, wake) : DIERR_NOTEXCLUSIVEACQUIRED;
     }
 
     template<class Call>
     HRESULT with_command(DWORD id, CommandRow row, Call&& call, const DIEFFECT* input = nullptr,
-                         const DWORD* handle = nullptr) {
+                         const DWORD* handle = nullptr, bool wake = true) {
         return with(id, [&](Mixer& mixer, Time time) {
             row.time = time;
             row.status = call(mixer, time);
@@ -757,11 +776,11 @@ private:
             }
             session_->record(row, input);
             return row.status;
-        });
+        }, wake);
     }
 
     HRESULT reject_command(DWORD id, CommandRow row) {
-        with_command(id, row, [&](Mixer&, Time) { return row.status; });
+        with_command(id, row, [&](Mixer&, Time) { return row.status; }, nullptr, nullptr, false);
         return row.status;
     }
 

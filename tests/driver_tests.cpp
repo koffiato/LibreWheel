@@ -35,6 +35,23 @@ void compatibility_arrival() {
           "compatibility interface is not native");
 }
 
+void sample_deadline() {
+    using namespace std::chrono_literals;
+    using lw::win::next_sample_deadline;
+    check(next_sample_deadline(100ms, 0ms, 2ms, false) == 102ms,
+          "first active tick schedules one period ahead");
+    check(next_sample_deadline(100500us, 102ms, 2ms, true) == 102ms,
+          "early wakeup preserves the pending periodic deadline");
+    check(next_sample_deadline(101999us, 102ms, 2ms, true) == 102ms,
+          "repeated early wakeups do not push the periodic deadline forward");
+    check(next_sample_deadline(102ms, 102ms, 2ms, true) == 104ms,
+          "on-time timer wakeup advances by one fixed period");
+    check(next_sample_deadline(102400us, 102ms, 2ms, true) == 104ms,
+          "minor wakeup jitter stays phase-locked to the previous deadline");
+    check(next_sample_deadline(110ms, 102ms, 2ms, true) == 112ms,
+          "overdue wakeup after a hitch reschedules one period from now without burst catch-up");
+}
+
 void polarity() {
     DWORD axis = DIDFT_ABSAXIS;
     LONG direction = 0;
@@ -208,6 +225,7 @@ int wmain(int argc, wchar_t** argv) {
         return failures != 0;
     }
     compatibility_arrival();
+    sample_deadline();
     polarity();
     check(argc == 2 && exports(argv[1]), "load COM DLL and resolve exports");
     IClassFactory* factory = nullptr;
