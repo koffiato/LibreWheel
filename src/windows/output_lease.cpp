@@ -35,7 +35,8 @@ struct DeleteAttributes {
 
 } // namespace
 
-OutputLease::OutputLease(const std::wstring& path, unsigned range, const std::filesystem::path& report_log) {
+OutputLease::OutputLease(const std::wstring& path, unsigned range, const std::filesystem::path& report_log,
+                         const std::filesystem::path& broker_override) {
     SECURITY_ATTRIBUTES inherit{sizeof(inherit), nullptr, TRUE};
     changed_ = handle(CreateEventW(&inherit, FALSE, FALSE, nullptr));
     stop_ = handle(CreateEventW(&inherit, TRUE, FALSE, nullptr));
@@ -58,7 +59,7 @@ OutputLease::OutputLease(const std::wstring& path, unsigned range, const std::fi
     }
     InterlockedExchange64(&mailbox_->latest, frame(0x80));
 
-    const auto application = broker_path();
+    const auto application = broker_override.empty() ? broker_path() : broker_override;
     std::wstring command = L"\"" + application.wstring() + L"\"";
     std::array inherited{parent.get(), mapping.get(), changed_.get(), stop_.get(), ready.get()};
     for (const HANDLE inherited_handle : inherited) {
@@ -100,6 +101,7 @@ OutputLease::OutputLease(const std::wstring& path, unsigned range, const std::fi
     const HANDLE events[]{process_.get(), ready.get()};
     if (WaitForMultipleObjects(2, events, FALSE, 1000) != WAIT_OBJECT_0 + 1) {
         SetEvent(stop_.get());
+        WaitForSingleObject(process_.get(), lease_timeout_ms + 100);
         throw std::runtime_error("The LibreWheel output process could not initialize the wheel");
     }
 }
@@ -109,21 +111,42 @@ OutputLease::~OutputLease() {
     WaitForSingleObject(process_.get(), lease_timeout_ms + 100);
 }
 
-bool OutputLease::publish(std::uint8_t force) noexcept {
-    if (WaitForSingleObject(process_.get(), 0) != WAIT_TIMEOUT) {
-        return false;
+PublishStatus OutputLease::check_exit() const noexcept {
+    if (WaitForSingleObject(process_.get(), 0) == WAIT_TIMEOUT) {
+        return PublishStatus::ok;
+    }
+    DWORD code = 0;
+    if (!GetExitCodeProcess(process_.get(), &code)) {
+        return PublishStatus::external_kill;
+    }
+    switch (static_cast<BrokerExit>(code)) {
+    case BrokerExit::watchdog_timeout: return PublishStatus::watchdog_timeout;
+    case BrokerExit::user_stop:        return PublishStatus::user_stop;
+    case BrokerExit::device_error:     return PublishStatus::device_error;
+    default:                           return PublishStatus::external_kill;
+    }
+}
+
+PublishStatus OutputLease::publish(std::uint8_t force) noexcept {
+    const auto status = check_exit();
+    if (status != PublishStatus::ok) {
+        return status;
     }
     const auto current = frame(force);
     InterlockedExchange64(&mailbox_->latest, current);
     const auto tick = static_cast<ULONGLONG>(current) >> 8;
-    // Keep the older broker alive too. A new force byte always wakes it immediately.
+    // While idle at neutral (0x80), the broker sleeps without watchdog timeout.
+    if (force == 0x80 && last_force_ == 0x80) {
+        return PublishStatus::ok;
+    }
+    // Keep the watchdog refreshed during steady nonzero torque; changes wake immediately.
     constexpr auto heartbeat_ms = lease_timeout_ms / 3;
     if (force == last_force_ && tick - last_signal_ < heartbeat_ms) {
-        return true;
+        return PublishStatus::ok;
     }
     last_force_ = force;
     last_signal_ = tick;
-    return SetEvent(changed_.get()) != FALSE;
+    return SetEvent(changed_.get()) != FALSE ? PublishStatus::ok : PublishStatus::device_error;
 }
 
 } // namespace lw::win

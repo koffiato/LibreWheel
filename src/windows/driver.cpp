@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <condition_variable>
 #include <cstring>
 #include <mutex>
 #include <new>
@@ -25,10 +24,22 @@ using namespace std::chrono_literals;
 
 std::atomic_long objects = 0;
 std::atomic_long server_locks = 0;
+#ifdef LIBREWHEEL_BENCH_OUTPUT
+std::atomic_bool output_suppressed = false;
+#endif
 
 constexpr DWORD nominal = DI_FFNOMINALMAX;
-constexpr auto sample_period = 4ms;
+constexpr auto sample_period = 2ms; // Matches the G29 native 500 Hz firmware loop.
 constexpr auto maximum_motion_age = 50ms;
+
+Handle create_high_res_timer() noexcept {
+    auto timer = handle(CreateWaitableTimerExW(
+        nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS));
+    if (!timer) {
+        timer = handle(CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS));
+    }
+    return timer;
+}
 
 Time now() noexcept { return trace_time(); }
 double level(LONG value) noexcept { return std::clamp(double(value) / nominal, -1.0, 1.0); }
@@ -149,13 +160,17 @@ struct CommandRow {
         trigger = input.dwTriggerButton;
         trigger_repeat = input.dwTriggerRepeatInterval;
         start_delay = input.dwSize == sizeof(DIEFFECT) ? input.dwStartDelay : 0;
-        axis = *input.rgdwAxes;
-        direction = *input.rglDirection;
-        if (input.lpEnvelope && type <= 6) {
+        axis = input.rgdwAxes ? *input.rgdwAxes : 0;
+        direction = input.rglDirection ? *input.rglDirection : 0;
+        if (input.lpEnvelope && type <= 6 && input.lpEnvelope->dwSize == sizeof(DIENVELOPE)) {
             envelope = *input.lpEnvelope;
         }
-        parameter_size = input.cbTypeSpecificParams;
-        std::memcpy(parameters.data(), input.lpvTypeSpecificParams, parameter_size);
+        if (input.lpvTypeSpecificParams && input.cbTypeSpecificParams > 0) {
+            parameter_size = std::min<DWORD>(input.cbTypeSpecificParams, static_cast<DWORD>(parameters.size()));
+            std::memcpy(parameters.data(), input.lpvTypeSpecificParams, parameter_size);
+        } else {
+            parameter_size = 0;
+        }
     }
 };
 
@@ -276,6 +291,14 @@ public:
                 OutputDebugStringW(L"LibreWheel: unable to start the force-feedback trace\n");
             }
         }
+        wake_event_ = handle(CreateEventW(nullptr, FALSE, FALSE, nullptr));
+        timer_ = create_high_res_timer();
+        if (!wake_event_ || !timer_) {
+            throw std::runtime_error("Unable to create LibreWheel session timing primitives");
+        }
+#ifdef LIBREWHEEL_BENCH_OUTPUT
+        user_stop_ = handle(CreateEventW(nullptr, TRUE, FALSE, user_stop_event_name));
+#endif
         thread_ = std::thread([this] { run(); });
     }
 
@@ -284,7 +307,9 @@ public:
             std::lock_guard lock(mutex_);
             closing_ = true;
         }
-        wake_.notify_one();
+        if (wake_event_) {
+            SetEvent(wake_event_.get());
+        }
         if (thread_.joinable()) {
             thread_.join();
         }
@@ -294,12 +319,17 @@ public:
     }
 
     template<class Call> HRESULT access(Call&& call) {
-        std::lock_guard lock(mutex_);
-        if (lost_) {
-            return DIERR_INPUTLOST;
+        HRESULT result = DI_OK;
+        {
+            std::lock_guard lock(mutex_);
+            if (lost_) {
+                return DIERR_INPUTLOST;
+            }
+            result = call(mixer_, now());
         }
-        const auto result = call(mixer_, now());
-        wake_.notify_one();
+        if (wake_event_) {
+            SetEvent(wake_event_.get());
+        }
         return result;
     }
 
@@ -335,26 +365,75 @@ private:
     void run() noexcept {
 #ifdef LIBREWHEEL_BENCH_OUTPUT
         std::unique_ptr<OutputLease> output;
-        Time last_tick{};
+        auto suppress_output = [&](const char* event_name, bool emergency_stop) {
+            output_suppressed.store(true, std::memory_order_release);
+            output.reset();
+            if (emergency_stop) {
+                try {
+                    HidOutput emergency(input_->info().path);
+                    emergency.send(g29::torque(0x80));
+                } catch (...) {}
+            }
+            std::lock_guard lock(mutex_);
+            mixer_.stop_all();
+            record({now(), event_name, DI_OK});
+        };
+        auto launch_output = [&] {
+            const auto log = trace_ ? trace_->next_usb_log() : std::filesystem::path{};
+            output = std::make_unique<OutputLease>(input_->info().path, settings_.range.value_or(0), log);
+        };
+        auto handle_broker_status = [&](PublishStatus status) {
+            switch (status) {
+            case PublishStatus::ok:
+                return;
+            case PublishStatus::watchdog_timeout:
+                output.reset();
+                OutputDebugStringW(L"LibreWheel: output watchdog timed out; will resume when active\n");
+                {
+                    std::lock_guard lock(mutex_);
+                    record({now(), "output_watchdog_timeout", DI_OK});
+                }
+                return;
+            case PublishStatus::user_stop:
+                suppress_output("output_stopped_by_user", false);
+                OutputDebugStringW(L"LibreWheel: output stopped by tray shutdown\n");
+                return;
+            case PublishStatus::external_kill:
+                suppress_output("output_killed_externally", true);
+                OutputDebugStringW(L"LibreWheel: output process stopped externally; suppressing recreation\n");
+                return;
+            case PublishStatus::device_error:
+                throw std::runtime_error("Output device error");
+            }
+        };
 #endif
-        std::unique_lock lock(mutex_);
         try {
             std::uint8_t previous = 0x80;
             int steering_raw = -1;
+            Time next_tick{};
+            bool was_active = false;
             input_->begin();
-            while (!closing_) {
-                const auto time = now();
-                std::optional<unsigned> steering;
-                // Drain already completed input reports so the force evaluator sees recent steering.
-                // Bound the work in case the device fills the queue faster than we can read it.
-                for (unsigned count = 0; count < 64; ++count) {
-                    const auto input = input_->take_steering();
-                    if (!input) {
-                        break;
-                    }
-                    steering = *input;
-                    input_->begin();
+#ifdef LIBREWHEEL_BENCH_OUTPUT
+            if (output_enabled_) {
+                if (user_stop_ && WaitForSingleObject(user_stop_.get(), 0) == WAIT_OBJECT_0) {
+                    suppress_output("output_stopped_by_user", false);
+                } else if (!output_suppressed.load(std::memory_order_acquire)) {
+                    launch_output();
                 }
+            }
+#endif
+            while (true) {
+#ifdef LIBREWHEEL_BENCH_OUTPUT
+                if (output_enabled_ && !output_suppressed.load(std::memory_order_acquire)) {
+                    if (user_stop_ && WaitForSingleObject(user_stop_.get(), 0) == WAIT_OBJECT_0) {
+                        suppress_output("output_stopped_by_user", false);
+                    } else if (output) {
+                        handle_broker_status(output->check_exit());
+                    }
+                }
+#endif
+                const auto time = now();
+                const auto steering = input_->drain_steering();
                 if (steering) {
                     track(*steering, time);
                     steering_raw = static_cast<int>(*steering);
@@ -364,30 +443,38 @@ private:
                     // still applies while the outstanding read watches for changes.
                     motion_.derivatives_valid = false;
                 }
-                const auto [mixed, active] = mixer_.sample(time, motion_);
+
+                Mixer::Sample sampled{};
+                bool closing = false;
+                {
+                    std::lock_guard lock(mutex_);
+                    closing = closing_;
+                    if (!closing) {
+                        sampled = mixer_.sample(time, motion_);
+                    }
+                }
+                if (closing) {
+                    break;
+                }
+
+                const auto [mixed, active] = sampled;
                 const auto corrected = corrected_force(mixed, settings_);
                 const auto force = g29::force_byte(corrected);
                 if (trace_) {
                     trace_->mix.add({time, steering_raw, steering.has_value(), motion_, active, mixed, corrected, force});
                 }
 #ifdef LIBREWHEEL_BENCH_OUTPUT
-                if (output && time - last_tick > std::chrono::milliseconds(lease_timeout_ms)) {
-                    throw std::runtime_error("Mixer deadline missed");
+                if (output_enabled_ && !output_suppressed.load(std::memory_order_acquire)) {
+                    if (!output && active && force != 0x80) {
+                        launch_output();
+                        was_active = false;
+                        // Recompute after process startup, which may outlast the effect.
+                        continue;
+                    }
+                    if (output) {
+                        handle_broker_status(output->publish(active ? force : std::uint8_t{0x80}));
+                    }
                 }
-                if (output && !active) {
-                    output.reset();
-                }
-                if (output_enabled_ && active && !output && force != 0x80) {
-                    const auto log = trace_ ? trace_->next_usb_log() : std::filesystem::path{};
-                    output = std::make_unique<OutputLease>(input_->info().path, settings_.range.value_or(0), log);
-                    last_tick = now();
-                    // Recompute after process startup, which may outlast the effect.
-                    continue;
-                }
-                if (output && !output->publish(force)) {
-                    throw std::runtime_error("Output process stopped");
-                }
-                last_tick = time;
 #endif
                 if (force != previous && settings_.diagnostics) {
                     // Report transitions between idle and active without logging the update stream.
@@ -397,15 +484,46 @@ private:
                     }
                 }
                 previous = force;
+
+                HANDLE wait_handles[4]{wake_event_.get()};
+                DWORD wait_count = 1;
+#ifdef LIBREWHEEL_BENCH_OUTPUT
+                if (output_enabled_ && !output_suppressed.load(std::memory_order_acquire)) {
+                    if (user_stop_) {
+                        wait_handles[wait_count++] = user_stop_.get();
+                    }
+                    if (output) {
+                        wait_handles[wait_count++] = output->process_handle();
+                    }
+                }
+#endif
                 if (active) {
-                    wake_.wait_for(lock, sample_period, [&] {
-                        return closing_ || mixer_.paused() || !mixer_.enabled() || !mixer_.active(now());
-                    });
+                    const auto current = now();
+                    if (!was_active || next_tick <= current) {
+                        next_tick = current + sample_period;
+                    } else {
+                        next_tick += sample_period;
+                        if (next_tick <= current) {
+                            next_tick = current + sample_period;
+                        }
+                    }
+                    was_active = true;
+                    const auto delay_us = std::max<Time::rep>(1, (next_tick - current).count());
+                    LARGE_INTEGER due{};
+                    due.QuadPart = -delay_us * 10;
+                    if (!SetWaitableTimerEx(timer_.get(), &due, 0, nullptr, nullptr, nullptr, 0)) {
+                        throw std::runtime_error("Unable to arm high-resolution mixer timer");
+                    }
+                    wait_handles[wait_count++] = timer_.get();
                 } else {
-                    wake_.wait(lock);
+                    was_active = false;
+                }
+                if (WaitForMultipleObjects(wait_count, wait_handles, FALSE, INFINITE) == WAIT_FAILED) {
+                    throw std::runtime_error("Mixer wait failed");
                 }
             }
         } catch (...) {
+            std::lock_guard lock(mutex_);
             mixer_.stop_all();
             lost_ = true;
             record({now(), "session_lost", DIERR_INPUTLOST});
@@ -414,7 +532,11 @@ private:
     }
 
     std::mutex mutex_;
-    std::condition_variable wake_;
+    Handle wake_event_;
+    Handle timer_;
+#ifdef LIBREWHEEL_BENCH_OUTPUT
+    Handle user_stop_;
+#endif
     Mixer mixer_;
     Motion motion_;
     Time input_time_{};

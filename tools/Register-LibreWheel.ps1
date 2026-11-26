@@ -202,7 +202,7 @@ try {
         $driver = $user64.CreateSubKey($forceKey)
         $created.Add(@{Hive = $user64; Key = $forceKey})
         try {
-            $driver.SetValue('Attributes', (Get-Bytes @(0, 4000, 4000)), $binary)
+            $driver.SetValue('Attributes', (Get-Bytes @(0, 2000, 2000)), $binary)
             foreach ($effect in (Get-Effects)) {
                 $key = $driver.CreateSubKey("Effects\$($effect.Guid)")
                 try {

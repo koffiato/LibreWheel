@@ -70,27 +70,27 @@ private:
     std::unique_ptr<TraceBuffer<ReportRow>> trace_;
 };
 
-bool run(OutputSignals signals, OutputMailbox& mailbox, unsigned range, const std::wstring& path,
-         const wchar_t* log) {
+BrokerExit run(OutputSignals signals, OutputMailbox& mailbox, unsigned range, const std::wstring& path,
+               const wchar_t* log) {
     TracedOutput trace(log);
-    const auto owner = handle(CreateMutexW(nullptr, FALSE, L"Global\\LibreWheel.G29.Output"));
+    const auto owner = handle(CreateMutexW(nullptr, FALSE, output_mutex_name));
     if (!owner) {
-        return false;
+        return BrokerExit::device_error;
     }
     const auto ownership = WaitForSingleObject(owner.get(), 0);
     if (ownership != WAIT_OBJECT_0 && ownership != WAIT_ABANDONED) {
-        return false;
+        return BrokerExit::device_error;
     }
     struct Unlock {
         HANDLE mutex;
         ~Unlock() { ReleaseMutex(mutex); }
     } unlock{owner.get()};
-    HidOutput output(path);
 #ifdef LIBREWHEEL_FULL_FORCE
     constexpr auto strength = OutputStrength::full;
 #else
     constexpr auto strength = OutputStrength::limited;
 #endif
+    HidOutput output(path);
     struct Output {
         HidOutput& device;
         TracedOutput& trace;
@@ -103,7 +103,7 @@ bool run(OutputSignals signals, OutputMailbox& mailbox, unsigned range, const st
 
 int wmain(int argc, wchar_t** argv) {
     if (argc != 8 && argc != 9) {
-        return 1;
+        return static_cast<int>(BrokerExit::invalid_args);
     }
     try {
         const auto parent = handle(reinterpret_cast<HANDLE>(argument(argv[1])));
@@ -115,12 +115,13 @@ int wmain(int argc, wchar_t** argv) {
         const MailboxView mailbox(static_cast<OutputMailbox*>(
             MapViewOfFile(mapping.get(), FILE_MAP_WRITE, 0, 0, sizeof(OutputMailbox))));
         if (!parent || !changed || !stop || !ready || !mailbox || range > 900) {
-            return 1;
+            return static_cast<int>(BrokerExit::invalid_args);
         }
-        const OutputSignals signals{parent.get(), changed.get(), stop.get(), ready.get()};
-        return run(signals, *mailbox, static_cast<unsigned>(range), argv[7], argc == 9 ? argv[8] : nullptr)
-            ? 0 : 1;
+        const auto user_stop = handle(CreateEventW(nullptr, TRUE, FALSE, user_stop_event_name));
+        const OutputSignals signals{parent.get(), changed.get(), stop.get(), ready.get(), user_stop.get()};
+        return static_cast<int>(run(signals, *mailbox, static_cast<unsigned>(range), argv[7],
+                                    argc == 9 ? argv[8] : nullptr));
     } catch (...) {
-        return 1;
+        return static_cast<int>(BrokerExit::device_error);
     }
 }

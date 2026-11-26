@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -37,7 +38,7 @@ struct Input {
 std::vector<DeviceInfo> discover();
 bool compatibility_connected();
 bool is_compatibility_interface(std::wstring_view path) noexcept;
-std::optional<DeviceInfo> initialize_native();
+std::optional<DeviceInfo> initialize_native(std::stop_token stop = {});
 GUID hid_interface_guid() noexcept;
 std::filesystem::path settings_path();
 
@@ -53,6 +54,7 @@ public:
     void begin();
     std::optional<Input> take();
     std::optional<unsigned> take_steering();
+    std::optional<unsigned> drain_steering(unsigned max_reports = 64);
 
 private:
     bool take_report();
@@ -63,6 +65,7 @@ private:
     std::unique_ptr<void, FreePreparsed> descriptor_;
     DeviceInfo info_;
     std::vector<char> buffer_;
+    std::vector<char> latest_;
     OVERLAPPED operation_{};
     bool pending_ = false;
 };

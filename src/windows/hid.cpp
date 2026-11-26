@@ -10,8 +10,10 @@ extern "C" {
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <filesystem>
+#include <mutex>
 #include <span>
 #include <stdexcept>
 #include <string_view>
@@ -241,7 +243,7 @@ bool is_compatibility_interface(std::wstring_view path) noexcept {
     return matches_interface(path, compatibility_interface);
 }
 
-std::optional<DeviceInfo> initialize_native() {
+std::optional<DeviceInfo> initialize_native(std::stop_token stop) {
     using namespace std::chrono_literals;
 
     auto native = discover();
@@ -258,6 +260,9 @@ std::optional<DeviceInfo> initialize_native() {
     }
     if (compatibility.size() > 1) {
         throw std::runtime_error("Connect one G29 before initializing it");
+    }
+    if (stop.stop_requested()) {
+        return std::nullopt;
     }
 
     const auto file = open(compatibility.front(), GENERIC_WRITE);
@@ -279,8 +284,14 @@ std::optional<DeviceInfo> initialize_native() {
 
     // The second write can lose its completion when the wheel detaches.
     // The native collection is the success criterion.
+    std::mutex wait_mutex;
+    std::condition_variable_any wait_cv;
+    std::unique_lock wait_lock(wait_mutex);
     const auto deadline = std::chrono::steady_clock::now() + 5s;
     do {
+        if (stop.stop_requested()) {
+            return std::nullopt;
+        }
         native = discover();
         if (native.size() == 1) {
             return std::move(native.front());
@@ -288,7 +299,9 @@ std::optional<DeviceInfo> initialize_native() {
         if (native.size() > 1) {
             throw std::runtime_error("More than one G29 appeared after initialization");
         }
-        std::this_thread::sleep_for(100ms);
+        if (wait_cv.wait_for(wait_lock, stop, 100ms, [] { return false; }) || stop.stop_requested()) {
+            return std::nullopt;
+        }
     } while (std::chrono::steady_clock::now() < deadline);
     throw std::runtime_error(acknowledged ? "G29 did not re-enumerate in native mode"
                                           : "G29 mode-switch write failed and no native collection appeared");
@@ -310,6 +323,7 @@ HidInput::HidInput(const std::wstring& path)
     }
     info_ = std::move(*info);
     buffer_.resize(info_.input_bytes);
+    latest_.resize(info_.input_bytes);
 }
 
 HidInput::~HidInput() {
@@ -352,6 +366,7 @@ bool HidInput::take_report() {
     if (transferred != buffer_.size() || buffer_.front() != 0) {
         win_error("Unexpected G29 input report", ERROR_INVALID_DATA);
     }
+    buffer_.swap(latest_);
     return true;
 }
 
@@ -359,7 +374,7 @@ unsigned HidInput::usage(unsigned short id) {
     const auto descriptor = static_cast<PHIDP_PREPARSED_DATA>(descriptor_.get());
     ULONG value = 0;
     if (HidP_GetUsageValue(HidP_Input, HID_USAGE_PAGE_GENERIC, 0, id, &value, descriptor,
-                          buffer_.data(), static_cast<ULONG>(buffer_.size()))
+                          latest_.data(), static_cast<ULONG>(latest_.size()))
         != HIDP_STATUS_SUCCESS) {
         win_error("Unexpected G29 input descriptor", ERROR_INVALID_DATA);
     }
@@ -373,6 +388,18 @@ std::optional<unsigned> HidInput::take_steering() {
     return usage(HID_USAGE_GENERIC_X);
 }
 
+std::optional<unsigned> HidInput::drain_steering(unsigned max_reports) {
+    bool received = false;
+    for (unsigned count = 0; count < max_reports; ++count) {
+        if (!take_report()) {
+            break;
+        }
+        received = true;
+        begin();
+    }
+    return received ? std::optional<unsigned>(usage(HID_USAGE_GENERIC_X)) : std::nullopt;
+}
+
 std::optional<Input> HidInput::take() {
     if (!take_report()) {
         return std::nullopt;
@@ -383,7 +410,7 @@ std::optional<Input> HidInput::take() {
     ULONG count = static_cast<ULONG>(buttons.size());
     const auto descriptor = static_cast<PHIDP_PREPARSED_DATA>(descriptor_.get());
     if (HidP_GetUsages(HidP_Input, HID_USAGE_PAGE_BUTTON, 0, buttons.data(), &count,
-                       descriptor, buffer_.data(), static_cast<ULONG>(buffer_.size())) != HIDP_STATUS_SUCCESS) {
+                       descriptor, latest_.data(), static_cast<ULONG>(latest_.size())) != HIDP_STATUS_SUCCESS) {
         win_error("Unexpected G29 button descriptor", ERROR_INVALID_DATA);
     }
     for (ULONG index = 0; index < count; ++index) {

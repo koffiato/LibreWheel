@@ -12,7 +12,7 @@ using namespace lw::win;
 using namespace lw::g29;
 using namespace std::chrono_literals;
 
-enum class End { host_exit, stale, explicit_stop, send_error, steady_force };
+enum class End { host_exit, stale, explicit_stop, user_stop, send_error, steady_force, idle_wait };
 
 struct Sink {
     HANDLE applied;
@@ -35,16 +35,29 @@ bool verify(End reason, OutputStrength strength) {
     const auto changed = handle(CreateEventW(nullptr, FALSE, FALSE, nullptr));
     const auto stop = handle(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     const auto ready = handle(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    const auto user_stop = handle(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     const auto applied = handle(CreateEventW(nullptr, TRUE, FALSE, nullptr));
-    if (!(parent && changed && stop && ready && applied)) {
+    if (!(parent && changed && stop && ready && user_stop && applied)) {
         return false;
     }
-    const OutputSignals signals{parent.get(), changed.get(), stop.get(), ready.get()};
+    const OutputSignals signals{parent.get(), changed.get(), stop.get(), ready.get(), user_stop.get()};
     OutputMailbox mailbox{};
+    InterlockedExchange64(&mailbox.latest, frame(0x80));
     Sink sink{applied.get(), reason == End::send_error};
-    bool result = false;
+    BrokerExit result = BrokerExit::device_error;
     std::thread worker([&] { result = drive_output(sink, signals, mailbox, 900, strength); });
     const bool started = WaitForSingleObject(ready.get(), 1000) == WAIT_OBJECT_0;
+    if (reason == End::idle_wait) {
+        // An idle-neutral broker must stay alive past the watchdog timeout without exiting.
+        std::this_thread::sleep_for(std::chrono::milliseconds(lease_timeout_ms + 60));
+        InterlockedExchange64(&mailbox.latest, frame(0xff));
+        SetEvent(changed.get());
+        const bool wrote = WaitForSingleObject(applied.get(), 1000) == WAIT_OBJECT_0;
+        SetEvent(stop.get());
+        worker.join();
+        return started && wrote && result == BrokerExit::stopped && sink.used == 5u &&
+            sink.reports[3] == torque(0xff) && sink.reports[4] == torque(0x80);
+    }
     InterlockedExchange64(&mailbox.latest, frame(0xff));
     SetEvent(changed.get());
     const bool wrote = WaitForSingleObject(applied.get(), 1000) == WAIT_OBJECT_0;
@@ -53,6 +66,8 @@ bool verify(End reason, OutputStrength strength) {
         SetEvent(stop.get());
     } else if (reason == End::host_exit) {
         SetEvent(parent.get());
+    } else if (reason == End::user_stop) {
+        SetEvent(user_stop.get());
     } else if (reason == End::steady_force) {
         // Refresh the mailbox through an entire watchdog interval without waking the broker.
         for (unsigned i = 0; i < 8; ++i) {
@@ -66,10 +81,15 @@ bool verify(End reason, OutputStrength strength) {
         SetEvent(stop.get());
     }
     worker.join();
+    BrokerExit expected_exit = BrokerExit::stopped;
+    if (reason == End::send_error) expected_exit = BrokerExit::device_error;
+    else if (reason == End::stale) expected_exit = BrokerExit::watchdog_timeout;
+    else if (reason == End::user_stop) expected_exit = BrokerExit::user_stop;
+
     const std::uint8_t expected = strength == OutputStrength::full ? 0xff : 0x8c;
     const bool steady = reason == End::steady_force;
     const std::uint8_t second = strength == OutputStrength::full ? 0x40 : 0x74;
-    return started && wrote && result == (reason != End::send_error) && sink.used == (steady ? 6u : 5u) &&
+    return started && wrote && result == expected_exit && sink.used == (steady ? 6u : 5u) &&
         sink.reports[0] == torque(0x80) && sink.reports[1] == disable_centering() &&
         sink.reports[2] == operating_range(900) && sink.reports[3] == torque(expected) &&
         (!steady || (second_force_written && sink.reports[4] == torque(second))) &&
@@ -101,7 +121,8 @@ bool trace_ring() {
 } // namespace
 
 int main() {
-    for (auto end : {End::host_exit, End::stale, End::explicit_stop, End::send_error, End::steady_force}) {
+    for (auto end : {End::host_exit, End::stale, End::explicit_stop, End::user_stop,
+                     End::send_error, End::steady_force, End::idle_wait}) {
         // The steady-force fixture exercises both ends of the bench clamp.
         const auto strength = end == End::steady_force ? OutputStrength::limited : OutputStrength::full;
         if (!verify(end, strength)) {
