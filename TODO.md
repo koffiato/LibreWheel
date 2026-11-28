@@ -1,12 +1,12 @@
 # LibreWheel TODO
 
-## Damper, Friction, and Inertia Condition Effects
+## Damper and Inertia Condition Effects
 
-`src/effects.cpp` already evaluates `Damper`, `Friction`, and `Inertia`, but `tools/Register-LibreWheel.ps1` intentionally does not advertise them to DirectInput yet because raw single-step finite-difference derivatives over short tick intervals are too noisy and uncalibrated for stable force feedback.
+`Spring` and `Friction` are advertised and verified on physical G29 hardware using the range-calibrated, low-latency filtered `MotionTracker` (`src/effects.cpp`).
 
-Before advertising these effects:
+`Damper` and `Inertia` are also implemented and calibrated in `src/effects.cpp` (`500 deg/s` velocity reference, `18000 deg/s²` acceleration reference), but are intentionally not advertised in DirectInput registration yet until bench-verified in games that exercise them:
 
-- [ ] Replace raw single-step finite-difference velocity and acceleration in `Session::track()` (`src/windows/driver.cpp`) with a low-latency filtered estimator (such as an alpha-beta or low-pass filter) so 1-count encoder quantization does not create large acceleration spikes.
-- [ ] Calibrate velocity and acceleration normalization to realistic G29 angular rates, accounting for the active `range_degrees`.
-- [ ] Replace the discontinuous `(velocity > 0) - (velocity < 0)` step in `ConditionKind::friction` (`src/effects.cpp`) with a narrow linear ramp around zero velocity (`std::clamp(v / v_knee, -1.0, 1.0)`) to avoid buzz when holding the rim stationary.
-- [ ] Bench-verify stability, scaling, and feel on physical G29 hardware, then advertise `Damper`, `Inertia`, and `Friction` in `tools/Register-LibreWheel.ps1`.
+- [x] Replace raw single-step finite-difference velocity and acceleration in `Session::track()` with a low-latency exponential-filtered `MotionTracker` (`src/effects.cpp`) that holds across normal 2 ms HID intervals and decays smoothly when stationary.
+- [x] Calibrate Spring stiffness (`125°` full-scale physical angle), Damper velocity (`500 deg/s`), and Inertia acceleration (`18000 deg/s²`) normalization in physical degrees, accounting for the active `range_degrees`.
+- [x] Replace the discontinuous `(velocity > 0) - (velocity < 0)` step in `ConditionKind::friction` with a critically-damped `tanh` viscous-to-Coulomb ramp (`60 deg/s` knee, `0.14` torque scale), and advertise `Friction` alongside `0–7`.
+- [ ] Bench-verify `Damper` and `Inertia` stability, scaling, and feel on physical G29 hardware in games that use them, then advertise them in `src/windows/registration.cpp` and `tools/Register-LibreWheel.ps1`.

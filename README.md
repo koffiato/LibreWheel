@@ -181,7 +181,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\Build-Installer.ps1
 
 ## Scope and Limitations
 
-The driver runs a 500 Hz single-axis software mixer paired with an out-of-process HID output broker (`LibreWheelOutput.exe`) that stays idle when neutral and enforces a 150 ms active-torque watchdog. DirectInput registration advertises Constant Force, Ramp, Square, Sine, Triangle, Sawtooth Up/Down, and Spring (with attack/fade envelopes). The evaluator also contains Damper, Friction, and Inertia calculations, which are intentionally not advertised yet pending derivative filtering and hardware calibration (see [TODO.md](TODO.md)).
+The driver runs a 500 Hz single-axis software mixer paired with an out-of-process HID output broker (`LibreWheelOutput.exe`) that stays idle when neutral and enforces a 150 ms active-torque watchdog. DirectInput registration advertises Constant Force, Ramp, Square, Sine, Triangle, Sawtooth Up/Down, Spring, and Friction (with attack/fade envelopes). The evaluator also contains Damper and Inertia calculations, which are intentionally not advertised yet pending hardware bench verification in games that use them (see [TODO.md](TODO.md)).
 
 When the driver opens the wheel for force feedback, the output broker disables the firmware's default autocentering spring, leaving game-created spring effects to the mixer. PS4 mode (`046d:c260`), `DIPROP_AUTOCENTER`, effect triggers, custom forces, non-DirectInput FFB APIs, and game-specific workarounds are outside this release's verified scope.
 

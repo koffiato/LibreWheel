@@ -84,6 +84,42 @@ void polarity() {
     check(force() == -0.5, "one-axis spherical source also defaults to +X");
 }
 
+void condition_and_custom_effects() {
+    DWORD axis = DIDFT_ABSAXIS;
+    LONG direction = 0;
+    DICONDITION condition{0, 8000, 8000, 10000, 10000, 0};
+    DIEFFECT effect{};
+    effect.dwSize = sizeof(effect);
+    effect.dwFlags = DIEFF_OBJECTIDS | DIEFF_CARTESIAN;
+    effect.dwDuration = 200000;
+    effect.dwGain = DI_FFNOMINALMAX;
+    effect.cAxes = 1;
+    effect.rgdwAxes = &axis;
+    effect.rglDirection = &direction;
+    effect.cbTypeSpecificParams = sizeof(condition);
+    effect.lpvTypeSpecificParams = &condition;
+
+    const lw::Motion moving{0.2, 0.4, 0.5, 3.6, true, true};
+    const lw::Motion still{0.2, 0.0, 0.0, 3.6, true, true};
+    for (DWORD type : {8ul, 9ul, 10ul}) {
+        lw::Effect translated;
+        check(lw::win::translate_effect(type, &effect, translated) == DI_OK,
+              "translate advertised condition effect");
+        check(lw::evaluate(translated, lw::Time{}, moving) < 0.0,
+              "active condition effect opposes positive motion");
+        check(lw::evaluate(translated, lw::Time{}, still) == 0.0,
+              "velocity/acceleration condition effect is zero when stationary");
+    }
+
+    LONG samples[2]{5000, -5000};
+    DICUSTOMFORCE custom{1, 10000, 2, samples};
+    effect.cbTypeSpecificParams = sizeof(custom);
+    effect.lpvTypeSpecificParams = &custom;
+    lw::Effect translated_custom;
+    check(lw::win::translate_effect(11, &effect, translated_custom) == DIERR_UNSUPPORTED,
+          "unadvertised custom force effect is rejected");
+}
+
 void lifecycle(IDirectInputEffectDriver& driver, wchar_t* device_path, bool physical);
 
 bool exports(const wchar_t* path, wchar_t* device_path = nullptr) {
@@ -227,6 +263,7 @@ int wmain(int argc, wchar_t** argv) {
     compatibility_arrival();
     sample_deadline();
     polarity();
+    condition_and_custom_effects();
     check(argc == 2 && exports(argv[1]), "load COM DLL and resolve exports");
     IClassFactory* factory = nullptr;
     check(DllGetClassObject(lw::win::driver_class, IID_IClassFactory,

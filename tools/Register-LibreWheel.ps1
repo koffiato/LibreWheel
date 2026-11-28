@@ -30,18 +30,38 @@ function Get-Bytes([uint32[]] $Words) {
 }
 
 function Get-Effects {
-    $names = @('Constant Force', 'Ramp Force', 'Square', 'Sine', 'Triangle',
-        'Sawtooth Up', 'Sawtooth Down', 'Spring')
-    $categories = @(1, 2, 3, 3, 3, 3, 3, 4)
-    for ($i = 0; $i -lt $names.Count; ++$i) {
+    $defs = @(
+        @{ Id = 0;  Name = 'Constant Force'; Category = 1 }
+        @{ Id = 1;  Name = 'Ramp Force';     Category = 2 }
+        @{ Id = 2;  Name = 'Square';         Category = 3 }
+        @{ Id = 3;  Name = 'Sine';           Category = 3 }
+        @{ Id = 4;  Name = 'Triangle';       Category = 3 }
+        @{ Id = 5;  Name = 'Sawtooth Up';    Category = 3 }
+        @{ Id = 6;  Name = 'Sawtooth Down';  Category = 3 }
+        @{ Id = 7;  Name = 'Spring';         Category = 4 }
+        @{ Id = 10; Name = 'Friction';       Category = 4 }
+    )
+    foreach ($def in $defs) {
         # SDK DIEFT_*, DIEP_* and DIEFF_* flags. Phase and envelope are type-specific.
-        $capabilities = if ($i -eq 7) { 0xF800 } else { 0x8600 }
-        $dynamic = if ($i -eq 7) { 0x345 } else { 0x3C5 }
+        $isCondition = $def.Category -eq 4
+        $capabilities = if ($isCondition) { 0xF800 } else { 0x8600 }
+        $dynamic = if ($isCondition) { 0x345 } else { 0x3C5 }
         [pscustomobject] @{
-            Guid = '{{13541C{0:X2}-8E33-11D0-9AD0-00A0C9A06E35}}' -f (0x20 + $i)
-            Name = $names[$i]
-            Attributes = Get-Bytes @($i, ($categories[$i] -bor $capabilities), ($dynamic -bor 0x20), $dynamic, 0x10)
+            Guid = '{{13541C{0:X2}-8E33-11D0-9AD0-00A0C9A06E35}}' -f (0x20 + $def.Id)
+            Name = $def.Name
+            Attributes = Get-Bytes @($def.Id, ($def.Category -bor $capabilities), ($dynamic -bor 0x20), $dynamic, 0x10)
         }
+    }
+}
+
+function Write-Effects($DriverKey) {
+    $DriverKey.DeleteSubKeyTree('Effects', $false)
+    foreach ($effect in (Get-Effects)) {
+        $key = $DriverKey.CreateSubKey("Effects\$($effect.Guid)")
+        try {
+            $key.SetValue('', $effect.Name, $string)
+            $key.SetValue('Attributes', $effect.Attributes, $binary)
+        } finally { $key.Dispose() }
     }
 }
 
@@ -245,6 +265,7 @@ try {
                 if ($null -ne $driver) {
                     try {
                         $driver.SetValue('Attributes', (Get-Bytes @(0, 2000, 2000)), $binary)
+                        Write-Effects $driver
                     } finally {
                         $driver.Dispose()
                     }
@@ -311,13 +332,7 @@ try {
         $created.Add(@{Hive = $user64; Key = $forceKey})
         try {
             $driver.SetValue('Attributes', (Get-Bytes @(0, 2000, 2000)), $binary)
-            foreach ($effect in (Get-Effects)) {
-                $key = $driver.CreateSubKey("Effects\$($effect.Guid)")
-                try {
-                    $key.SetValue('', $effect.Name, $string)
-                    $key.SetValue('Attributes', $effect.Attributes, $binary)
-                } finally { $key.Dispose() }
-            }
+            Write-Effects $driver
             # Publish the product-to-class association after both binaries and all effects are registered.
             $driver.SetValue('CLSID', $class, $string)
         } finally { $driver.Dispose() }

@@ -64,9 +64,13 @@ double condition_force(const Condition& condition, const Motion& motion) noexcep
         }
         switch (condition.kind) {
         case ConditionKind::spring: break;
-        case ConditionKind::damper: metric = motion.velocity; break;
-        case ConditionKind::inertia: metric = motion.acceleration; break;
-        case ConditionKind::friction: metric = (motion.velocity > 0) - (motion.velocity < 0); break;
+        case ConditionKind::damper:
+        case ConditionKind::friction:
+            metric = motion.velocity;
+            break;
+        case ConditionKind::inertia:
+            metric = motion.acceleration;
+            break;
         }
     }
     const double delta = metric - condition.offset;
@@ -76,10 +80,131 @@ double condition_force(const Condition& condition, const Motion& motion) noexcep
     const double coefficient = delta > 0 ? condition.positive_coefficient : condition.negative_coefficient;
     const double limit = delta > 0 ? condition.positive_limit : condition.negative_limit;
     const double displacement = std::copysign(std::abs(delta) - condition.deadband, delta);
+    if (condition.kind == ConditionKind::spring) {
+        const double scale = std::max(1.0, motion.spring_scale);
+        return std::clamp(-coefficient * scale * displacement, -limit, limit);
+    }
+    if (condition.kind == ConditionKind::friction) {
+        constexpr double knee = MotionTracker::friction_knee_deg_s / MotionTracker::reference_velocity_deg_s;
+        const double force = -coefficient * MotionTracker::friction_torque_scale * std::tanh(displacement / knee);
+        return std::clamp(force, -limit, limit);
+    }
     return std::clamp(-coefficient * displacement, -limit, limit);
 }
 
 } // namespace
+
+MotionTracker::MotionTracker(double range_degrees) noexcept {
+    set_range_degrees(range_degrees);
+}
+
+void MotionTracker::set_range_degrees(double range_degrees) noexcept {
+    half_range_deg_ = std::clamp(range_degrees, 40.0, 900.0) * 0.5;
+}
+
+void MotionTracker::reset() noexcept {
+    position_ = 0;
+    angle_deg_ = 0;
+    velocity_deg_s_ = 0;
+    acceleration_deg_s2_ = 0;
+    last_report_time_ = {};
+    last_step_time_ = {};
+    initialized_ = false;
+}
+
+Motion MotionTracker::step(std::optional<unsigned> steering_raw, Time time) noexcept {
+    constexpr double tau_v = 0.005;
+    constexpr double tau_a = 0.020;
+    constexpr auto report_hold_window = std::chrono::microseconds(4000);
+    const double spring_scale = std::max(1.0, half_range_deg_ / spring_full_degrees);
+
+    if (steering_raw) {
+        const unsigned raw = *steering_raw;
+        const double next_pos = raw >= 32768 ? (double(raw) - 32768.0) / 32767.0
+                                             : (double(raw) - 32768.0) / 32768.0;
+        const double next_angle = next_pos * half_range_deg_;
+        if (!initialized_) {
+            position_ = next_pos;
+            angle_deg_ = next_angle;
+            velocity_deg_s_ = 0;
+            acceleration_deg_s2_ = 0;
+            last_report_time_ = time;
+            last_step_time_ = time;
+            initialized_ = true;
+            return {position_, 0.0, 0.0, spring_scale, true, true};
+        }
+        // Use the interval between actual HID reports (unless we already started decaying).
+        const auto base_time = std::max(last_report_time_, last_step_time_);
+        const double dt = std::chrono::duration<double>(time - base_time).count();
+        if (dt <= 0.0 || dt > 0.05) {
+            position_ = next_pos;
+            angle_deg_ = next_angle;
+            velocity_deg_s_ = 0;
+            acceleration_deg_s2_ = 0;
+            last_report_time_ = time;
+            last_step_time_ = time;
+            return {position_, 0.0, 0.0, spring_scale, true, true};
+        }
+        const double decay_v = std::exp(-dt / tau_v);
+        const double gain_v = dt > 1e-6 ? (1.0 - decay_v) / dt : 1.0 / tau_v;
+        const double next_vel = decay_v * velocity_deg_s_ + gain_v * (next_angle - angle_deg_);
+
+        const double decay_a = std::exp(-dt / tau_a);
+        const double gain_a = dt > 1e-6 ? (1.0 - decay_a) / dt : 1.0 / tau_a;
+        const double next_acc = decay_a * acceleration_deg_s2_ + gain_a * (next_vel - velocity_deg_s_);
+
+        position_ = next_pos;
+        angle_deg_ = next_angle;
+        velocity_deg_s_ = std::abs(next_vel) < 1e-4 ? 0.0 : next_vel;
+        acceleration_deg_s2_ = std::abs(next_acc) < 1e-3 ? 0.0 : next_acc;
+        last_report_time_ = time;
+        last_step_time_ = time;
+        return {position_,
+                velocity_deg_s_ / reference_velocity_deg_s,
+                acceleration_deg_s2_ / reference_acceleration_deg_s2,
+                spring_scale, true, true};
+    }
+
+    if (!initialized_) {
+        return {0.0, 0.0, 0.0, spring_scale, false, false};
+    }
+
+    // Do not decay between normal 2 ms USB HID reports; only decay once reports stop arriving.
+    if (time - last_report_time_ <= report_hold_window) {
+        return {position_,
+                velocity_deg_s_ / reference_velocity_deg_s,
+                acceleration_deg_s2_ / reference_acceleration_deg_s2,
+                spring_scale, true, true};
+    }
+
+    const double dt = std::chrono::duration<double>(time - last_step_time_).count();
+    if (dt <= 0.0) {
+        return {position_,
+                velocity_deg_s_ / reference_velocity_deg_s,
+                acceleration_deg_s2_ / reference_acceleration_deg_s2,
+                spring_scale, true, true};
+    }
+    if (dt > 0.05) {
+        velocity_deg_s_ = 0;
+        acceleration_deg_s2_ = 0;
+        last_step_time_ = time;
+        return {position_, 0.0, 0.0, spring_scale, true, true};
+    }
+    const double decay_v = std::exp(-dt / tau_v);
+    const double next_vel = decay_v * velocity_deg_s_;
+
+    const double decay_a = std::exp(-dt / tau_a);
+    const double gain_a = dt > 1e-6 ? (1.0 - decay_a) / dt : 1.0 / tau_a;
+    const double next_acc = decay_a * acceleration_deg_s2_ + gain_a * (next_vel - velocity_deg_s_);
+
+    velocity_deg_s_ = std::abs(next_vel) < 1e-4 ? 0.0 : next_vel;
+    acceleration_deg_s2_ = std::abs(next_acc) < 1e-3 ? 0.0 : next_acc;
+    last_step_time_ = time;
+    return {position_,
+            velocity_deg_s_ / reference_velocity_deg_s,
+            acceleration_deg_s2_ / reference_acceleration_deg_s2,
+            spring_scale, true, true};
+}
 
 double evaluate(const Effect& effect, Time elapsed, const Motion& motion) noexcept {
     if (elapsed < Time::zero() || elapsed >= effect.duration) {

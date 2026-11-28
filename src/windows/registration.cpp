@@ -271,6 +271,44 @@ std::wstring timestamp_string() {
     return out.str();
 }
 
+void write_effects(HKEY driver) {
+    struct EffectDef {
+        const wchar_t* guid;
+        const wchar_t* name;
+        std::uint32_t id;
+        std::uint32_t category;
+        std::uint32_t capabilities;
+        std::uint32_t dynamic_params;
+    };
+    constexpr std::array<EffectDef, 9> effects{{
+        {L"{13541C20-8E33-11D0-9AD0-00A0C9A06E35}", L"Constant Force", 0,  1, 0x8600u, 0x3c5u},
+        {L"{13541C21-8E33-11D0-9AD0-00A0C9A06E35}", L"Ramp Force",     1,  2, 0x8600u, 0x3c5u},
+        {L"{13541C22-8E33-11D0-9AD0-00A0C9A06E35}", L"Square",         2,  3, 0x8600u, 0x3c5u},
+        {L"{13541C23-8E33-11D0-9AD0-00A0C9A06E35}", L"Sine",           3,  3, 0x8600u, 0x3c5u},
+        {L"{13541C24-8E33-11D0-9AD0-00A0C9A06E35}", L"Triangle",       4,  3, 0x8600u, 0x3c5u},
+        {L"{13541C25-8E33-11D0-9AD0-00A0C9A06E35}", L"Sawtooth Up",    5,  3, 0x8600u, 0x3c5u},
+        {L"{13541C26-8E33-11D0-9AD0-00A0C9A06E35}", L"Sawtooth Down",  6,  3, 0x8600u, 0x3c5u},
+        {L"{13541C27-8E33-11D0-9AD0-00A0C9A06E35}", L"Spring",         7,  4, 0xf800u, 0x345u},
+        {L"{13541C2A-8E33-11D0-9AD0-00A0C9A06E35}", L"Friction",      10,  4, 0xf800u, 0x345u},
+    }};
+    if (const auto existing = open_key(driver, L"Effects",
+                                       DELETE | KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE | KEY_WOW64_64KEY)) {
+        RegDeleteTreeW(existing.get(), nullptr);
+    }
+    for (const auto& effect : effects) {
+        const std::wstring sub = std::wstring(L"Effects\\") + effect.guid;
+        const auto eff_key = create_key(driver, sub.c_str(), KEY_WRITE | KEY_WOW64_64KEY);
+        set_string(eff_key.get(), L"", effect.name);
+        set_words(eff_key.get(), L"Attributes", {
+            effect.id,
+            effect.category | effect.capabilities,
+            effect.dynamic_params | 0x20u,
+            effect.dynamic_params,
+            0x10u,
+        });
+    }
+}
+
 } // namespace
 
 bool is_process_elevated() noexcept {
@@ -471,6 +509,7 @@ void install_or_switch_registration(const std::filesystem::path& dll64,
         }
         if (const auto driver = open_key(HKEY_CURRENT_USER, force_feedback_key_path, KEY_WRITE | KEY_WOW64_64KEY)) {
             set_words(driver.get(), L"Attributes", {0u, 2000u, 2000u});
+            write_effects(driver.get());
         }
         return;
     }
@@ -525,37 +564,7 @@ void install_or_switch_registration(const std::filesystem::path& dll64,
         const auto driver = create_key(HKEY_CURRENT_USER, force_feedback_key_path, KEY_WRITE | KEY_WOW64_64KEY);
         created.push_back({force_feedback_key_path, KEY_WOW64_64KEY});
         set_words(driver.get(), L"Attributes", {0u, 2000u, 2000u});
-
-        struct EffectDef {
-            const wchar_t* guid;
-            const wchar_t* name;
-            std::uint32_t id;
-            std::uint32_t category;
-            std::uint32_t capabilities;
-            std::uint32_t dynamic_params;
-        };
-        constexpr std::array<EffectDef, 8> effects{{
-            {L"{13541C20-8E33-11D0-9AD0-00A0C9A06E35}", L"Constant Force", 0, 1, 0x8600u, 0x3c5u},
-            {L"{13541C21-8E33-11D0-9AD0-00A0C9A06E35}", L"Ramp Force",     1, 2, 0x8600u, 0x3c5u},
-            {L"{13541C22-8E33-11D0-9AD0-00A0C9A06E35}", L"Square",         2, 3, 0x8600u, 0x3c5u},
-            {L"{13541C23-8E33-11D0-9AD0-00A0C9A06E35}", L"Sine",           3, 3, 0x8600u, 0x3c5u},
-            {L"{13541C24-8E33-11D0-9AD0-00A0C9A06E35}", L"Triangle",       4, 3, 0x8600u, 0x3c5u},
-            {L"{13541C25-8E33-11D0-9AD0-00A0C9A06E35}", L"Sawtooth Up",    5, 3, 0x8600u, 0x3c5u},
-            {L"{13541C26-8E33-11D0-9AD0-00A0C9A06E35}", L"Sawtooth Down",  6, 3, 0x8600u, 0x3c5u},
-            {L"{13541C27-8E33-11D0-9AD0-00A0C9A06E35}", L"Spring",         7, 4, 0xf800u, 0x345u},
-        }};
-        for (const auto& effect : effects) {
-            const std::wstring sub = std::wstring(L"Effects\\") + effect.guid;
-            const auto eff_key = create_key(driver.get(), sub.c_str(), KEY_WRITE | KEY_WOW64_64KEY);
-            set_string(eff_key.get(), L"", effect.name);
-            set_words(eff_key.get(), L"Attributes", {
-                effect.id,
-                effect.category | effect.capabilities,
-                effect.dynamic_params | 0x20u,
-                effect.dynamic_params,
-                0x10u,
-            });
-        }
+        write_effects(driver.get());
         // Publish the product-to-class association last.
         set_string(driver.get(), L"CLSID", driver_class_text);
     } catch (...) {

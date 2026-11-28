@@ -38,8 +38,34 @@ struct Motion {
     double position = 0;
     double velocity = 0;
     double acceleration = 0;
+    double spring_scale = 1;
     bool position_valid = false;
     bool derivatives_valid = false;
+};
+
+class MotionTracker {
+public:
+    explicit MotionTracker(double range_degrees = 900.0) noexcept;
+
+    void set_range_degrees(double range_degrees) noexcept;
+    void reset() noexcept;
+    Motion step(std::optional<unsigned> steering_raw, Time time) noexcept;
+
+    static constexpr double spring_full_degrees = 125.0;
+    static constexpr double reference_velocity_deg_s = 500.0;
+    static constexpr double reference_acceleration_deg_s2 = 18000.0;
+    static constexpr double friction_knee_deg_s = 60.0;
+    static constexpr double friction_torque_scale = 0.14;
+
+private:
+    double half_range_deg_ = 450.0;
+    double position_ = 0;
+    double angle_deg_ = 0;
+    double velocity_deg_s_ = 0;
+    double acceleration_deg_s2_ = 0;
+    Time last_report_time_{};
+    Time last_step_time_{};
+    bool initialized_ = false;
 };
 
 double evaluate(const Effect& effect, Time elapsed, const Motion& motion) noexcept;

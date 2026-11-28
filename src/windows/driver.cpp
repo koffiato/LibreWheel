@@ -31,7 +31,6 @@ std::atomic_bool output_suppressed = false;
 
 constexpr DWORD nominal = DI_FFNOMINALMAX;
 constexpr auto sample_period = 2ms; // Matches the G29 native 500 Hz firmware loop.
-constexpr auto maximum_motion_age = 50ms;
 
 Handle create_high_res_timer() noexcept {
     auto timer = handle(CreateWaitableTimerExW(
@@ -274,6 +273,7 @@ public:
         if (!settings_warning.empty()) {
             OutputDebugStringA(("LibreWheel: " + settings_warning + "\n").c_str());
         }
+        motion_tracker_.set_range_degrees(static_cast<double>(settings_.range.value_or(900u)));
 #ifndef LIBREWHEEL_TEST_DRIVER
         wchar_t flag[2]{};
         const auto bench_len = GetEnvironmentVariableW(L"LIBREWHEEL_BENCH_OUTPUT", flag, 2);
@@ -347,25 +347,6 @@ public:
     }
 
 private:
-    void track(unsigned steering, Time time) noexcept {
-        const double position = steering >= 32768 ? (double(steering) - 32768) / 32767
-                                                  : (double(steering) - 32768) / 32768;
-        const auto interval = time - input_time_;
-        if (motion_.position_valid && interval >= 1ms && interval <= maximum_motion_age) {
-            const double seconds = std::chrono::duration<double>(interval).count();
-            const double velocity = (position - motion_.position) / seconds;
-            const double acceleration = motion_.derivatives_valid ? (velocity - motion_.velocity) / seconds : 0;
-            motion_.velocity = velocity;
-            motion_.acceleration = acceleration;
-            motion_.derivatives_valid = true;
-        } else {
-            motion_.derivatives_valid = false;
-        }
-        motion_.position = position;
-        motion_.position_valid = true;
-        input_time_ = time;
-    }
-
     void run() noexcept {
 #ifndef LIBREWHEEL_TEST_DRIVER
         std::unique_ptr<OutputLease> output;
@@ -437,38 +418,36 @@ private:
                     }
                 }
 #endif
-                const auto time = now();
                 const bool read_input = needs_motion_.load(std::memory_order_acquire) || trace_ != nullptr;
                 bool drained = false;
                 std::optional<unsigned> steering;
                 if (read_input) {
                     if (!was_reading_input) {
-                        input_time_ = {};
-                        motion_.derivatives_valid = false;
+                        motion_tracker_.reset();
                     }
                     steering = input_->drain_steering();
                     drained = true;
                     if (steering) {
-                        track(*steering, time);
                         steering_raw = static_cast<int>(*steering);
                     }
-                    if (time - input_time_ > maximum_motion_age) {
-                        // A stationary G29 can stop sending reports. Its last position
-                        // still applies while the outstanding read watches for changes.
-                        motion_.derivatives_valid = false;
-                    }
+                    motion_ = motion_tracker_.step(steering, now());
                 } else if (was_reading_input) {
-                    motion_.derivatives_valid = false;
+                    motion_tracker_.reset();
+                    motion_ = {};
                 }
                 was_reading_input = read_input;
 
                 Mixer::Sample sampled{};
+                Time sample_time{};
                 bool closing = false;
                 {
                     std::lock_guard lock(mutex_);
                     closing = closing_;
                     if (!closing) {
-                        sampled = mixer_.sample(time, motion_);
+                        // Sample time inside mutex_ so it can never precede an effect's
+                        // start timestamp written concurrently by DownloadEffect/StartEffect.
+                        sample_time = now();
+                        sampled = mixer_.sample(sample_time, motion_);
                         needs_motion_.store(sampled.uses_motion, std::memory_order_release);
                     }
                 }
@@ -484,7 +463,7 @@ private:
                 const auto corrected = corrected_force(mixed, settings_);
                 const auto force = g29::force_byte(corrected);
                 if (trace_) {
-                    trace_->mix.add({time, steering_raw, steering.has_value(), motion_, active, mixed, corrected, force});
+                    trace_->mix.add({sample_time, steering_raw, steering.has_value(), motion_, active, mixed, corrected, force});
                 }
 #ifndef LIBREWHEEL_TEST_DRIVER
                 if (output_enabled_ && !output_suppressed.load(std::memory_order_acquire)) {
@@ -558,7 +537,7 @@ private:
 #endif
     Mixer mixer_;
     Motion motion_;
-    Time input_time_{};
+    MotionTracker motion_tracker_;
     Settings settings_;
     std::unique_ptr<FfbTrace> trace_;
     std::unique_ptr<HidInput> input_;

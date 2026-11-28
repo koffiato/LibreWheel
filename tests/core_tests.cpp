@@ -75,24 +75,77 @@ void effects() {
     effect.parameters = Periodic{Wave::sine, 1.0, 0.5, 0.25, 40ms};
     equal(evaluate(effect, 0ms, {}), 1, "offset periodic saturation");
 
-    const Motion motion{0.65, -0.5, 0.2, true, true};
-    const Motion negative_motion{-0.65, -0.5, 0.2, true, true};
-    const Motion stationary{0.65, -0.5, 0.2, true, false};
+    const Motion motion{0.65, -0.5, 0.2, 1.0, true, true};
+    const Motion negative_motion{-0.65, -0.5, 0.2, 1.0, true, true};
+    const Motion stationary{0.65, -0.5, 0.2, 1.0, true, false};
     effect.parameters = Condition{ConditionKind::spring, 0.1, 0.05, 1, 0.5, 0.3, 0.2};
     equal(evaluate(effect, 0ms, motion), -0.3, "positive-side spring clamps to positive saturation");
     equal(evaluate(effect, 0ms, negative_motion), 0.2, "negative-side spring clamps to negative saturation");
     equal(evaluate(effect, 0ms, stationary), -0.3, "stationary spring retains the last steering position");
-    auto& condition = std::get<Condition>(effect.parameters);
-    condition.positive_limit = 0.8;
-    condition.negative_limit = 0.8;
-    condition.kind = ConditionKind::damper;
+    const Motion scaled_spring{0.1, 0, 0, 3.6, true, true};
+    effect.parameters = Condition{ConditionKind::spring, 0, 0, 0.5, 0.5, 1.0, 1.0};
+    equal(evaluate(effect, 0ms, scaled_spring), -0.18, "spring scales displacement by physical stiffness");
+
+    effect.parameters = Condition{ConditionKind::damper, 0.1, 0.05, 1, 0.5, 0.8, 0.8};
     equal(evaluate(effect, 0ms, motion), 0.275, "damper uses velocity");
     equal(evaluate(effect, 0ms, stationary), 0, "damper suppresses stale velocity");
+    auto& condition = std::get<Condition>(effect.parameters);
     condition.kind = ConditionKind::inertia;
     equal(evaluate(effect, 0ms, motion), -0.05, "inertia uses acceleration");
-    condition.kind = ConditionKind::friction;
-    equal(evaluate(effect, 0ms, motion), 0.525, "friction uses direction of motion");
+    condition = Condition{ConditionKind::friction, 0.0, 0.0, 0.8, 0.8, 1.0, 1.0};
+    equal(evaluate(effect, 0ms, Motion{0, 0.0, 0, 1.0, true, true}), 0.0, "friction is zero at rest");
+    const double tiny_friction = std::abs(evaluate(effect, 0ms, Motion{0, 0.1 / MotionTracker::reference_velocity_deg_s, 0, 1.0, true, true}));
+    check(tiny_friction > 0.0 && tiny_friction < 0.005, "friction avoids zero-velocity buzz");
+    const double steady_friction = evaluate(effect, 0ms, Motion{0, -1.0, 0, 1.0, true, true});
+    check(std::abs(steady_friction - 0.8 * MotionTracker::friction_torque_scale) < 1e-4,
+          "friction plateaus smoothly to Coulomb drag");
+    condition.negative_limit = 0.05;
+    equal(evaluate(effect, 0ms, Motion{0, -1.0, 0, 1.0, true, true}), 0.05, "friction respects saturation limit");
     equal(evaluate(effect, 0ms, {}), 0, "missing input has no condition force");
+
+    // MotionTracker: physical degree calibration, inter-report hold, smooth decay, and spike immunity.
+    MotionTracker tracker(900.0);
+    Time t = 0ms;
+    Motion tracked = tracker.step(32768u, t);
+    check(tracked.position_valid && tracked.derivatives_valid, "initial steering sample initializes tracker");
+    equal(tracked.spring_scale, 450.0 / MotionTracker::spring_full_degrees, "900 deg spring stiffness scale");
+    // Turn at a constant 100 deg/s (= 0.2 * 500 deg/s) with an out-of-phase timer tick between 2 ms HID reports.
+    for (int step = 1; step <= 60; ++step) {
+        t += 1500us;
+        const Motion mid = tracker.step(std::nullopt, t);
+        if (step > 20) {
+            check(std::abs(mid.velocity - 0.2) < 0.01, "inter-report timer tick holds velocity without sawtooth");
+        }
+        t += 500us;
+        const double deg = 100.0 * (step * 0.002);
+        const unsigned raw = static_cast<unsigned>(std::lround(32768.0 + (deg / 450.0) * 32767.0));
+        tracked = tracker.step(raw, t);
+    }
+    check(std::abs(tracked.velocity - 0.2) < 0.01, "tracker converges to steady physical angular velocity");
+    // Hold wheel stationary (no new HID reports) for 200 ms: velocity & acceleration decay smoothly to near zero.
+    for (int step = 1; step <= 100; ++step) {
+        t += 2ms;
+        tracked = tracker.step(std::nullopt, t);
+    }
+    check(std::abs(tracked.velocity) < 0.001 && std::abs(tracked.acceleration) < 0.005,
+          "stationary hold decays filtered derivatives smoothly without stale velocity");
+    // Tiny wakeup interval (50 us) with a 1-count encoder step must not produce a spike.
+    t += 50us;
+    tracked = tracker.step(static_cast<unsigned>(std::lround(32768.0 + (12.0 / 450.0) * 32767.0)) + 1u, t);
+    check(std::abs(tracked.velocity) < 0.01 && std::abs(tracked.acceleration) < 0.05,
+          "short wakeup with 1-count jitter stays spike-free");
+    // 540 deg range produces identical normalized velocity for 100 deg/s and proportional spring scale.
+    MotionTracker tracker540(540.0);
+    t = 0ms;
+    tracker540.step(32768u, t);
+    for (int step = 1; step <= 60; ++step) {
+        t += 2ms;
+        const double deg = 100.0 * (step * 0.002);
+        const unsigned raw = static_cast<unsigned>(std::lround(32768.0 + (deg / 270.0) * 32767.0));
+        tracked = tracker540.step(raw, t);
+    }
+    check(std::abs(tracked.velocity - 0.2) < 0.01, "velocity calibration accounts for active range_degrees");
+    equal(tracked.spring_scale, 270.0 / MotionTracker::spring_full_degrees, "540 deg spring stiffness scale");
 }
 
 void lifecycle() {
@@ -160,19 +213,19 @@ void lifecycle() {
     const auto spring_id = mixer.add(spring);
     check(!mixer.needs_motion(), "stopped spring does not require motion");
     check(mixer.start(spring_id, 600ms, 1) && mixer.needs_motion(), "started spring requires motion");
-    const auto active_spring = mixer.sample(605ms, Motion{0.5, 0, 0, true, false});
+    const auto active_spring = mixer.sample(605ms, Motion{0.5, 0, 0, 1.0, true, false});
     check(active_spring.active && active_spring.uses_motion, "active spring reports uses_motion");
     equal(active_spring.force, -0.5, "active spring evaluates position");
     mixer.pause(606ms);
-    check(!mixer.needs_motion() && !mixer.sample(610ms, Motion{0.5, 0, 0, true, false}).uses_motion,
+    check(!mixer.needs_motion() && !mixer.sample(610ms, Motion{0.5, 0, 0, 1.0, true, false}).uses_motion,
           "paused spring does not require motion");
     mixer.resume(610ms);
     mixer.set_enabled(false);
-    check(!mixer.needs_motion() && !mixer.sample(612ms, Motion{0.5, 0, 0, true, false}).uses_motion,
+    check(!mixer.needs_motion() && !mixer.sample(612ms, Motion{0.5, 0, 0, 1.0, true, false}).uses_motion,
           "disabled actuators do not require motion");
     mixer.set_enabled(true);
     check(mixer.needs_motion(), "re-enabled spring requires motion again");
-    const auto expired_spring = mixer.sample(630ms, Motion{0.5, 0, 0, true, false});
+    const auto expired_spring = mixer.sample(630ms, Motion{0.5, 0, 0, 1.0, true, false});
     check(!expired_spring.active && !expired_spring.uses_motion && !mixer.needs_motion(),
           "expired spring clears motion requirement");
 }
